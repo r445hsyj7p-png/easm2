@@ -37,6 +37,7 @@ export const T = {
   toolHttpx:        "#a78bfa",
   toolNuclei:       "#f43f5e",
   toolRamparts:     "#f97316",
+  toolSslyze:       "#06b6d4",
 
   text0:  "#f1f5f9",
   text1:  "#94a3b8",
@@ -69,4 +70,5 @@ export const TOOL_COLOR = {
   httpx:        T.toolHttpx,
   nuclei:       T.toolNuclei,
   ramparts:     T.toolRamparts,
+  sslyze:       T.toolSslyze,
 };
