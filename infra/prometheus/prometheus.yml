@@ -1,0 +1,31 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'easm-platform'
+
+scrape_configs:
+  - job_name: 'api'
+    static_configs:
+      - targets: ['api:8000']
+    metrics_path: /metrics
+
+  - job_name: 'worker-scan'
+    static_configs:
+      - targets: ['worker-scan:9691']
+
+  - job_name: 'worker-hibp'
+    static_configs:
+      - targets: ['worker-hibp:9691']
+
+  - job_name: 'worker-alerts'
+    static_configs:
+      - targets: ['worker-alerts:9691']
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
