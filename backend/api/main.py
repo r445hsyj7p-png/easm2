@@ -4,18 +4,58 @@ All endpoints backed by PostgreSQL. No demo data in request path.
 """
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from fastapi.responses import Response, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime, timedelta, timezone
-import uuid, hashlib, json, os, secrets as _secrets
+import uuid, json, os, secrets as _secrets, logging
+from passlib.context import CryptContext
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 import jwt as pyjwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db import repo
+
+# ─── Correlation-ID context ───────────────────────────────────────────────────
+request_id_var: ContextVar[str] = ContextVar("request_id", default="")
+
+class _RequestIDFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get("—")  # type: ignore[attr-defined]
+        return True
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(request_id)s] %(levelname)s %(name)s: %(message)s",
+)
+for _h in logging.root.handlers:
+    _h.addFilter(_RequestIDFilter())
+
+logger = logging.getLogger(__name__)
+
+# ─── Rate limiter ────────────────────────────────────────────────────────────
+
+def _real_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+limiter = Limiter(
+    key_func=_real_ip,
+    storage_uri=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+    default_limits=["300/minute"],
+)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 SECRET_KEY       = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
@@ -37,8 +77,13 @@ def decode_jwt(token: str) -> dict:
 
 # ─── Password hashing ─────────────────────────────────────────────────────────
 
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 def hash_pw(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return _pwd_ctx.hash(password)
+
+def verify_pw(plain: str, hashed: str) -> bool:
+    return _pwd_ctx.verify(plain, hashed)
 
 # ─── Auth context ─────────────────────────────────────────────────────────────
 
@@ -94,6 +139,21 @@ class FindingUpdateRequest(BaseModel):
 class ScanRequest(BaseModel):
     scan_type: str = "full"
 
+# ─── Request-ID Middleware ────────────────────────────────────────────────────
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/api/v1/health":
+            return await call_next(request)
+        rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        token = request_id_var.set(rid)
+        try:
+            response = await call_next(request)
+        finally:
+            request_id_var.reset(token)
+        response.headers["X-Request-ID"] = rid
+        return response
+
 # ─── App lifecycle ────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -103,10 +163,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="EASM MSSP Platform API",
     version="1.0.0",
-    description="External Attack Surface Management — Production API",
+    description="""
+## External Attack Surface Management
+
+REST API der EASM MSSP Plattform. Alle Endpunkte erfordern JWT-Authentifizierung
+(außer `/auth/status` und `/auth/login`).
+
+**Rollen:** `mssp_admin` · `mssp_analyst` · `customer_admin` · `customer_viewer`
+""",
+    openapi_tags=[
+        {"name": "Auth",         "description": "Login, Setup, Token-Verwaltung"},
+        {"name": "System",       "description": "Health-Check und Status"},
+        {"name": "Tenants",      "description": "Mandanten-Stammdaten"},
+        {"name": "Findings",     "description": "Sicherheitsbefunde verwalten"},
+        {"name": "Assets",       "description": "Erkannte Assets und Subdomains"},
+        {"name": "Scans",        "description": "Scan-Jobs steuern und überwachen"},
+        {"name": "MCP",          "description": "MCP-Server Erkennung"},
+        {"name": "Intelligence", "description": "Threat-Intelligence Snapshots"},
+        {"name": "MSSP",         "description": "MSSP-Überblick (nur für Admins)"},
+    ],
+    docs_url=None,
+    redoc_url=None,
+    contact={"name": "EASM MSSP Operations"},
     lifespan=lifespan,
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Middleware-Reihenfolge: LIFO → RequestID ist äußerste Schicht
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -114,6 +200,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIDMiddleware)
 
 # ─── Search router ────────────────────────────────────────────────────────────
 try:
@@ -121,6 +208,26 @@ try:
     app.include_router(search_router)
 except ImportError:
     pass
+
+# ─── Docs (gesichert, nur MSSP-Rollen) ───────────────────────────────────────
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui(ctx: AuthContext = Depends(get_auth)):
+    if ctx.role not in ("mssp_admin", "mssp_analyst"):
+        raise HTTPException(status_code=403, detail="Swagger-UI nur für MSSP-Mitarbeiter.")
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="EASM API — Swagger UI")
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_ui(ctx: AuthContext = Depends(get_auth)):
+    if ctx.role not in ("mssp_admin", "mssp_analyst"):
+        raise HTTPException(status_code=403, detail="ReDoc nur für MSSP-Mitarbeiter.")
+    return get_redoc_html(openapi_url="/openapi.json", title="EASM API — ReDoc")
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_schema(ctx: AuthContext = Depends(get_auth)):
+    if ctx.role not in ("mssp_admin", "mssp_analyst"):
+        raise HTTPException(status_code=403)
+    return JSONResponse(app.openapi())
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUTH
@@ -134,7 +241,8 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/auth/setup", response_model=LoginResponse, tags=["Auth"])
-async def setup(req: SetupRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/hour")
+async def setup(request: Request, req: SetupRequest, db: AsyncSession = Depends(get_db)):
     """Creates the first admin account. Only callable once."""
     count = await repo.user_count(db)
     if count > 0:
@@ -154,7 +262,8 @@ async def setup(req: SetupRequest, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/auth/login", response_model=LoginResponse, tags=["Auth"])
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute;30/hour")
+async def login(request: Request, req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate and receive a JWT."""
     count = await repo.user_count(db)
     if count == 0:
@@ -162,7 +271,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Ersteinrichtung erforderlich — bitte Admin-Account anlegen.")
 
     user = await repo.get_user_by_email(db, req.email)
-    if not user or user.get("pw_hash") != hash_pw(req.password):
+    if not user or not verify_pw(req.password, user.get("pw_hash", "")):
         raise HTTPException(status_code=401, detail="E-Mail oder Passwort falsch.")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account deaktiviert.")
@@ -225,7 +334,9 @@ async def list_findings(
 
 
 @app.patch("/api/v1/tenants/{tenant_id}/findings/{finding_id}", tags=["Findings"])
+@limiter.limit("100/minute")
 async def update_finding(
+    request: Request,
     tenant_id:  str,
     finding_id: str,
     req: FindingUpdateRequest,
@@ -298,7 +409,9 @@ async def list_scans(
 
 
 @app.post("/api/v1/tenants/{tenant_id}/scans", tags=["Scans"])
+@limiter.limit("10/hour")
 async def trigger_scan(
+    request: Request,
     tenant_id: str,
     req: ScanRequest,
     ctx: AuthContext = Depends(get_auth),
@@ -308,8 +421,12 @@ async def trigger_scan(
     scan_id = await repo.create_scan_job(db, tenant_id, req.scan_type, "manual")
     # Dispatch to Celery
     try:
-        from workers.scan_tasks import run_scan
-        run_scan.apply_async(args=[scan_id, tenant_id], queue="scans")
+        from workers.toolchain_tasks import run_full_pipeline
+        run_full_pipeline.apply_async(
+            args=[tenant_id, {"scan_id": scan_id, "scan_type": req.scan_type}],
+            kwargs={"request_id": request_id_var.get()},
+            queue="scans",
+        )
     except Exception:
         pass  # Worker not available — job still created in DB
     return {"scan_id": scan_id, "status": "pending"}

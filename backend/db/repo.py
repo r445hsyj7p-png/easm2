@@ -224,7 +224,14 @@ async def upsert_asset(db: AsyncSession, tenant_id: str, a: dict):
         VALUES
             (gen_random_uuid()::text, :tid, :fqdn, :ip::inet, :org, :asn,
              :ports, :risk, :sources, :takeover)
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (tenant_id, fqdn, ip) DO UPDATE SET
+            org       = EXCLUDED.org,
+            asn       = EXCLUDED.asn,
+            ports     = EXCLUDED.ports,
+            risk      = EXCLUDED.risk,
+            sources   = EXCLUDED.sources,
+            takeover  = EXCLUDED.takeover,
+            last_seen = NOW()
     """), {
         "tid": tenant_id, "fqdn": a.get("fqdn"),
         "ip": a.get("ip"), "org": a.get("org"), "asn": a.get("asn"),
@@ -255,7 +262,14 @@ async def upsert_mcp_server(db: AsyncSession, tenant_id: str, m: dict):
         VALUES
             (gen_random_uuid()::text, :tid, :url, :port, :auth, :tools,
              :server, :cve, :risk, :injection, :inspection)
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (tenant_id, url, port) DO UPDATE SET
+            auth               = EXCLUDED.auth,
+            tools              = EXCLUDED.tools,
+            server_info        = EXCLUDED.server_info,
+            cve                = EXCLUDED.cve,
+            risk               = EXCLUDED.risk,
+            injection          = EXCLUDED.injection,
+            inspection_active  = EXCLUDED.inspection_active
     """), {
         "tid": tenant_id, "url": m.get("url"), "port": m.get("port"),
         "auth": bool(m.get("auth")), "tools": m.get("tools", []),
@@ -297,12 +311,10 @@ async def list_scans(
         SELECT id,
                (SELECT domain FROM domains WHERE id = target_domain_id LIMIT 1) AS domain,
                scan_type, status,
-               COALESCE(
-                   (findings_count->>'CRITICAL')::int +
-                   (findings_count->>'HIGH')::int +
-                   (findings_count->>'MEDIUM')::int +
-                   (findings_count->>'LOW')::int, 0
-               ) AS findings_count,
+               COALESCE((findings_count->>'CRITICAL')::int, 0) +
+               COALESCE((findings_count->>'HIGH')::int, 0) +
+               COALESCE((findings_count->>'MEDIUM')::int, 0) +
+               COALESCE((findings_count->>'LOW')::int, 0) AS findings_count,
                risk_score_after AS risk_score,
                created_at AS started_at,
                completed_at AS finished_at,

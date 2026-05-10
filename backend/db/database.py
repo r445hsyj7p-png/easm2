@@ -3,7 +3,6 @@ database.py — Async SQLAlchemy engine + session factory
 """
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://easm:easm@localhost:5432/easm")
 

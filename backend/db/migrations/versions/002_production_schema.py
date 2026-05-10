@@ -63,7 +63,7 @@ def upgrade() -> None:
             epss        TEXT,
             kev         BOOLEAN DEFAULT FALSE,
             age         INTEGER DEFAULT 0,
-            desc        TEXT,
+            "desc"      TEXT,
             fix         TEXT,
             fingerprint TEXT UNIQUE,
             first_seen  TIMESTAMPTZ DEFAULT NOW(),
