@@ -8,6 +8,7 @@ python-multipart==0.0.9
 pydantic[email]==2.7.0
 PyJWT==2.9.0
 passlib[bcrypt]==1.7.4
+slowapi==0.1.9
 
 # ── Datenbank ──────────────────────────────────────────────────
 sqlalchemy==2.0.35

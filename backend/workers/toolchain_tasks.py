@@ -191,7 +191,7 @@ def get_tenants_by_plan(plan: str = "all") -> list:
     default_retry_delay=120,
     queue="scans"
 )
-def run_full_pipeline(self, tenant_id: str, config_dict: dict):
+def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str = ""):
     """
     Vollständige EASM-Pipeline für einen Mandanten.
 
@@ -206,7 +206,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict):
     from pipeline.orchestrator import EASMPipeline, PipelineConfig
 
     job_id = self.request.id
-    logger.info(f"[{job_id}] Pipeline START: tenant={tenant_id}")
+    logger.info(f"[{job_id}] [req={request_id}] Pipeline START: tenant={tenant_id}")
 
     try:
         # Status: Running
