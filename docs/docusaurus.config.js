@@ -102,14 +102,6 @@ const config = {
         darkTheme:     darkCodeTheme,
         additionalLanguages: ['bash', 'yaml', 'python', 'sql', 'nginx', 'docker'],
       },
-      algolia: {
-        // Algolia DocSearch — kostenfrei für Open-Source / Docs-Seiten
-        // Beantragen unter: https://docsearch.algolia.com/apply/
-        appId:     'YOUR_APP_ID',
-        apiKey:    'YOUR_SEARCH_API_KEY',
-        indexName: 'easm-platform',
-        contextualSearch: true,
-      },
     }),
 };
 

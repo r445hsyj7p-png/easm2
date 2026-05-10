@@ -9,10 +9,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --legacy-peer-deps --silent
+RUN npm install --legacy-peer-deps
 
 COPY . .
-RUN npm run build
+RUN npm run build 2>&1
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
 FROM nginx:1.25-alpine
