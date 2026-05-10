@@ -210,8 +210,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-easm}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - ./infra/postgres/02_rls.sql:/docker-entrypoint-initdb.d/02_rls.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -256,7 +254,10 @@ services:
 
   # ── Prometheus ────────────────────────────────────────────────────────────
   prometheus:
-    image: prom/prometheus:v2.53.0
+    build:
+      context: ./infra/prometheus
+      dockerfile: ../../docker/Dockerfile.prometheus
+    image: easm-prometheus:latest
     container_name: easm-prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -264,13 +265,15 @@ services:
       - "--storage.tsdb.retention.time=30d"
       - "--web.enable-lifecycle"
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     <<: *common
 
   # ── Grafana ───────────────────────────────────────────────────────────────
   grafana:
-    image: grafana/grafana:11.1.0
+    build:
+      context: ./infra/grafana
+      dockerfile: ../../docker/Dockerfile.grafana
+    image: easm-grafana:latest
     container_name: easm-grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
@@ -278,8 +281,6 @@ services:
       GF_INSTALL_PLUGINS: "grafana-clock-panel"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     depends_on:
       - prometheus
     labels:
