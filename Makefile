@@ -30,7 +30,6 @@ up: ## Alle Services starten
 	@echo "✓ Platform gestartet. Warte ~60s bis alle Services bereit sind."
 	@echo "  Frontend:  https://$$(grep APP_DOMAIN .env | cut -d= -f2)"
 	@echo "  Flower:    https://flower.$$(grep APP_DOMAIN .env | cut -d= -f2)"
-	@echo "  Grafana:   https://grafana.$$(grep APP_DOMAIN .env | cut -d= -f2)"
 
 down: ## Alle Services stoppen
 	$(COMPOSE) down
@@ -134,9 +133,6 @@ shell-worker: ## Shell im Scan-Worker
 # ── Monitoring ───────────────────────────────────────────────────────────────
 flower: ## Celery-Monitoring URL anzeigen
 	@echo "Flower: https://flower.$$(grep APP_DOMAIN .env | cut -d= -f2)"
-
-grafana: ## Grafana URL anzeigen
-	@echo "Grafana: https://grafana.$$(grep APP_DOMAIN .env | cut -d= -f2)"
 
 # ── Updates ──────────────────────────────────────────────────────────────────
 update: ## Plattform aktualisieren (git pull + rebuild)

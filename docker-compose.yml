@@ -252,47 +252,6 @@ services:
       - "traefik.http.routers.flower.tls.certresolver=letsencrypt"
       - "traefik.http.services.flower.loadbalancer.server.port=5555"
 
-  # ── Prometheus ────────────────────────────────────────────────────────────
-  prometheus:
-    build:
-      context: ./infra/prometheus
-      dockerfile: ../../docker/Dockerfile.prometheus
-    image: easm-prometheus:latest
-    container_name: easm-prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
-      - "--web.enable-lifecycle"
-    volumes:
-      - prometheus_data:/prometheus
-    <<: *common
-
-  # ── Grafana ───────────────────────────────────────────────────────────────
-  grafana:
-    build:
-      context: ./infra/grafana
-      dockerfile: ../../docker/Dockerfile.grafana
-    image: easm-grafana:latest
-    container_name: easm-grafana
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:-grafana.${APP_DOMAIN}}
-      GF_INSTALL_PLUGINS: "grafana-clock-panel"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`${GRAFANA_DOMAIN:-grafana.${APP_DOMAIN}}`)"
-      - "traefik.http.routers.grafana.entrypoints=websecure"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
-      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
-    <<: *common
-
-
-
   # ── Backup (täglich 03:00 UTC) ────────────────────────────────────────────
   backup:
     image: postgres:16-alpine
@@ -339,10 +298,6 @@ volumes:
   celery_beat:
     driver: local
   certs:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
     driver: local
   backups:
     driver: local

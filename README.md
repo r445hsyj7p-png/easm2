@@ -18,7 +18,6 @@ Browser öffnen: **http://localhost:3000** — beim ersten Aufruf Ersteinrichtun
 | Frontend  | http://localhost:3000      |
 | API Docs  | http://localhost:8000/docs |
 | Flower    | http://localhost:5555      |
-| Grafana   | http://localhost:3001      |
 
 ---
 
