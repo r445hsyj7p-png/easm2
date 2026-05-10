@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { T, SEV, TOOL_COLOR } from "../../theme";
-import { Sev, Tag, TH, TD } from "../ui/index";
+import { Sev, Tag, TH, TD } from "../../components/ui/index";
 import { useApp } from "../../context/AppContext";
 
 const FindingsTab = () => {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { T, SEV } from "../../theme";
-import { KPI, ScoreBar, Card, CardHeader, Sev, Tag, Pill } from "../ui/index";
+import { KPI, ScoreBar, Card, CardHeader, Sev, Tag, Pill } from "../../components/ui/index";
 import { useApp } from "../../context/AppContext";
 import { EFFORT_COLOR, buildRemediations } from "../../utils/remediations";
 
