@@ -210,8 +210,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-easm}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-      - ./infra/postgres/02_rls.sql:/docker-entrypoint-initdb.d/02_rls.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -253,44 +251,6 @@ services:
       - "traefik.http.routers.flower.entrypoints=websecure"
       - "traefik.http.routers.flower.tls.certresolver=letsencrypt"
       - "traefik.http.services.flower.loadbalancer.server.port=5555"
-
-  # ── Prometheus ────────────────────────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:v2.53.0
-    container_name: easm-prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
-      - "--web.enable-lifecycle"
-    volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    <<: *common
-
-  # ── Grafana ───────────────────────────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:11.1.0
-    container_name: easm-grafana
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:-grafana.${APP_DOMAIN}}
-      GF_INSTALL_PLUGINS: "grafana-clock-panel"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
-    depends_on:
-      - prometheus
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`${GRAFANA_DOMAIN:-grafana.${APP_DOMAIN}}`)"
-      - "traefik.http.routers.grafana.entrypoints=websecure"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
-      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
-    <<: *common
-
-
 
   # ── Backup (täglich 03:00 UTC) ────────────────────────────────────────────
   backup:
@@ -338,10 +298,6 @@ volumes:
   celery_beat:
     driver: local
   certs:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
     driver: local
   backups:
     driver: local
