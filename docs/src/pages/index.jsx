@@ -23,11 +23,11 @@ export default function Home() {
         </p>
         <div style={{ display:'flex', gap:'1rem', justifyContent:'center', flexWrap:'wrap' }}>
           <Link className="button button--primary button--lg"
-            to="/docs/getting-started/installation">
+            to="/getting-started/installation">
             Quick Start →
           </Link>
           <Link className="button button--secondary button--lg"
-            to="/docs/architecture/overview">
+            to="/architecture/overview">
             Architektur
           </Link>
         </div>

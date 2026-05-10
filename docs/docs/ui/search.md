@@ -119,4 +119,4 @@ GET /api/v1/search?q=severity:critical has:kev&scope=findings&limit=50
 Authorization: Bearer <token>
 ```
 
-Vollständige API-Dokumentation: [API → Findings](/docs/api/findings)
+Vollständige API-Dokumentation: [API → Findings](/api/findings)
