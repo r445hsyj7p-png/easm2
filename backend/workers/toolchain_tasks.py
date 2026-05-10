@@ -58,6 +58,7 @@ celery_app.conf.update(
         "workers.toolchain_tasks.run_spyonweb_scan":      {"queue": "intel"},
         "workers.toolchain_tasks.run_ip_reputation_check":{"queue": "intel"},
         "workers.toolchain_tasks.run_threat_intel_check": {"queue": "intel"},
+        "workers.toolchain_tasks.run_sslyze":             {"queue": "tls"},
     },
 
     # Beat-Schedules
@@ -95,6 +96,14 @@ celery_app.conf.update(
             "schedule": crontab(hour=6, minute=0),
             "args": ["all", "hibp_only"],
             "options": {"queue": "hibp"},
+        },
+
+        # ── TLS-Scan ──────────────────────────────────────────────────
+        "tls-scan-daily": {
+            "task": "workers.toolchain_tasks.schedule_tenants",
+            "schedule": crontab(hour=3, minute=30),
+            "args": ["all", "tls_only"],
+            "options": {"queue": "tls"},
         },
 
         # ── Wartung ───────────────────────────────────────────────────
@@ -681,7 +690,7 @@ def _build_config(plan: str, config_dict: dict):
         api_keys=config_dict.get("api_keys", {}),
         run_subfinder=True, run_naabu=True, run_theharvester=True,
         run_httpx=True, run_nuclei=True, run_ramparts=True,
-        run_mcp_scan=True,
+        run_sslyze=True, run_mcp_scan=True,
         subfinder_recursive=True,
         naabu_ports="top-1000", naabu_rate=2000, naabu_nmap=True,
         theharvester_full_sources=True, theharvester_limit=1000,

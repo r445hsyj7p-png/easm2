@@ -34,11 +34,12 @@ const ScanTimeline = ({ scans }) => (
 );
 
 const PHASES = [
-  { label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent, secs:40 },
-  { label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium, secs:28 },
-  { label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx, secs:34 },
-  { label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical, secs:67 },
-  { label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high, secs:12 },
+  { label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent,       secs:40 },
+  { label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium,       secs:28 },
+  { label:"TLS Scan",     tool:"sslyze — cipher + cert",   color:T.toolSslyze,   secs:22 },
+  { label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx,    secs:34 },
+  { label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical,     secs:67 },
+  { label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,         secs:12 },
 ];
 
 const SCAN_LOG = [
@@ -50,6 +51,10 @@ const SCAN_LOG = [
   { t:"naabu",        msg:"203.0.113.45 → 443, 1194 open", c:"yellow" },
   { t:"naabu",        msg:"203.0.113.46 → 443, 3389, 8080 open ← RDP exposed!", c:"red" },
   { t:"naabu",        msg:"203.0.113.55 → 80, 443, 6274, 6277, 8080 open ← MCP ports detected!", c:"red" },
+  { t:"sslyze",       msg:"scanning 8 TLS ports: 443 (×7), 587 (×1) | cipher + cert + protocol checks", c:"cyan" },
+  { t:"sslyze",       msg:"remote.mueller-gmbh.de:443 → TLS 1.0 + TLS 1.1 enabled [MEDIUM]", c:"yellow" },
+  { t:"sslyze",       msg:"vpn.mueller-gmbh.de:443 → RC4 + 3DES cipher suites accepted [MEDIUM]", c:"yellow" },
+  { t:"sslyze",       msg:"admin.mueller-gmbh.de:443 → HSTS missing [LOW] | mail cert expires in 8d [LOW]", c:"yellow" },
   { t:"httpx",        msg:"probing 31 services | tech-detect | favicon-hash | screenshots enabled", c:"purple" },
   { t:"httpx",        msg:"staging.mueller-gmbh.de/.env → HTTP 200 + APP_KEY exposed [CRITICAL]", c:"red" },
   { t:"httpx",        msg:"api.mueller-gmbh.de/actuator/env → propertySources visible [CRITICAL]", c:"red" },

@@ -13,6 +13,7 @@ export const TENANT = {
     theharvester: { emails: 31,     findings: 2,  duration: 22 },
     httpx:        { urls: 19,       findings: 8,  duration: 34 },
     nuclei:       { templates: 7,   findings: 11, duration: 67 },
+    sslyze:       { ports: 8,       findings: 3,  duration: 22 },
     ramparts:     { mcp: 1,         findings: 3,  duration: 12 },
   },
 };
@@ -86,6 +87,21 @@ export const FINDINGS = [
     cvss:0.0,  kev:false, epss:"—",     age:1,  status:"open",
     desc:"TLS certificate expires 2026-05-14. Browser warnings imminent. HSTS preload will cause extended outage if not renewed.",
     fix:"Renew certificate. Configure auto-renewal via Let's Encrypt certbot or ACME protocol." },
+  { id:"f14", sev:"MEDIUM",  cat:"TLS",         tool:"sslyze",
+    title:"TLS 1.0 / 1.1 noch aktiv", asset:"remote.mueller-gmbh.de:443",
+    cvss:5.9,  kev:false, epss:"0.18",  age:1,  status:"open",
+    desc:"Server accepts TLS 1.0 and TLS 1.1 connections. Both protocols are deprecated (RFC 8996) and vulnerable to POODLE and BEAST attacks. PCI-DSS 4.0 requires TLS ≥ 1.2.",
+    fix:"Disable TLS 1.0/1.1 in server config. For nginx: ssl_protocols TLSv1.2 TLSv1.3. For Apache: SSLProtocol -all +TLSv1.2 +TLSv1.3." },
+  { id:"f15", sev:"MEDIUM",  cat:"TLS",         tool:"sslyze",
+    title:"Schwache Cipher-Suites aktiv (RC4, 3DES)", asset:"vpn.mueller-gmbh.de:443",
+    cvss:5.3,  kev:false, epss:"—",     age:1,  status:"open",
+    desc:"Server negotiates RC4 and 3DES cipher suites. RC4 is cryptographically broken (RFC 7465). 3DES is vulnerable to Sweet32 birthday attacks on long-lived sessions.",
+    fix:"Remove RC4 and 3DES from cipher suite list. Use only ECDHE+AES-GCM and ChaCha20-Poly1305. Test with: sslyze --regular <host>." },
+  { id:"f16", sev:"LOW",     cat:"TLS",         tool:"sslyze",
+    title:"HSTS nicht konfiguriert", asset:"admin.mueller-gmbh.de:443",
+    cvss:3.1,  kev:false, epss:"—",     age:1,  status:"open",
+    desc:"HTTP Strict Transport Security header missing. Allows protocol downgrade attacks. Without HSTS, attackers can intercept initial HTTP requests before redirect to HTTPS.",
+    fix:"Add header: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload" },
 ];
 
 export const SUBDOMAINS = [
