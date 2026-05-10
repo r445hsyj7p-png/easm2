@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime, timedelta, timezone
-import uuid, hashlib, json, os, secrets as _secrets
+import uuid, json, os, secrets as _secrets
+from passlib.context import CryptContext
 
 import jwt as pyjwt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,8 +38,13 @@ def decode_jwt(token: str) -> dict:
 
 # ─── Password hashing ─────────────────────────────────────────────────────────
 
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 def hash_pw(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return _pwd_ctx.hash(password)
+
+def verify_pw(plain: str, hashed: str) -> bool:
+    return _pwd_ctx.verify(plain, hashed)
 
 # ─── Auth context ─────────────────────────────────────────────────────────────
 
@@ -162,7 +168,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Ersteinrichtung erforderlich — bitte Admin-Account anlegen.")
 
     user = await repo.get_user_by_email(db, req.email)
-    if not user or user.get("pw_hash") != hash_pw(req.password):
+    if not user or not verify_pw(req.password, user.get("pw_hash", "")):
         raise HTTPException(status_code=401, detail="E-Mail oder Passwort falsch.")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Account deaktiviert.")
