@@ -1,0 +1,34 @@
+id: mcp-inspector-exposed
+info:
+  name: MCP Inspector Exposed (CVE-2025-49596)
+  severity: critical
+  cvss-score: 9.4
+  description: |
+    MCP Inspector is a developer tool and must never run in production.
+    When exposed, DNS rebinding attacks allow arbitrary tool injection.
+  cve-id: CVE-2025-49596
+  tags: [mcp, inspector, cve]
+
+ports:
+  - 6274
+  - 6277
+
+checks:
+  - name: inspector_proxy_port
+    method: GET
+    path: /
+    port: 6274
+    match:
+      - type: status
+        status: [200]
+    severity: critical
+
+  - name: inspector_sse_endpoint
+    method: GET
+    path: /sse
+    port: 6277
+    match:
+      - type: word
+        words: ["text/event-stream", "data:"]
+        condition: or
+    severity: critical

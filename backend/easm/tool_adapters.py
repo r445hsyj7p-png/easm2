@@ -1,0 +1,2000 @@
+"""
+EASM Toolchain — Tool Adapters
+==============================
+Einheitliche Wrapper für alle externen Security-Tools.
+Jeder Adapter:
+  - ruft das Tool via subprocess auf
+  - parsed JSON-Output
+  - konvertiert Ergebnisse in Finding-Objekte
+  - ist als Celery-Task aufrufbar
+
+Tools: Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
+"""
+
+import subprocess
+import json
+import os
+import re
+import shutil
+import hashlib
+import tempfile
+import datetime
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+from pathlib import Path
+
+
+# ─── Basis-Finding ────────────────────────────────────────────────────────────
+
+@dataclass
+class ToolFinding:
+    """Einheitliches Finding-Format für alle Tools"""
+    tenant_id: str
+    tool: str                    # subfinder | naabu | theharvester | httpx | nuclei | ramparts
+    category: str                # subdomain | port | email | http | vulnerability | mcp
+    severity: str                # CRITICAL | HIGH | MEDIUM | LOW | INFO
+    title: str
+    description: str
+    affected_asset: str          # host, IP:Port, E-Mail, URL
+    remediation: str = ""
+    raw_data: dict = field(default_factory=dict)
+    cve_id: str = ""
+    cvss_score: float = 0.0
+    cisa_kev: bool = False
+    fingerprint: str = ""        # SHA256 für Deduplizierung
+    discovered_at: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+
+    def __post_init__(self):
+        if not self.fingerprint:
+            fp_str = f"{self.tool}:{self.category}:{self.affected_asset}:{self.title}"
+            self.fingerprint = hashlib.sha256(fp_str.encode()).hexdigest()[:16]
+
+
+def _run(cmd: list, timeout: int = 300, env: dict = None) -> tuple[int, str, str]:
+    """Führt externes Tool aus, gibt (returncode, stdout, stderr) zurück"""
+    try:
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=proc_env
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", f"Timeout nach {timeout}s"
+    except FileNotFoundError:
+        return -2, "", f"Tool nicht gefunden: {cmd[0]}"
+    except Exception as e:
+        return -3, "", str(e)
+
+
+def tool_available(name: str) -> bool:
+    """Prüft ob ein Tool im PATH verfügbar ist"""
+    return shutil.which(name) is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 1: SUBFINDER
+# Subdomain-Discovery via 50+ passive Quellen + Bruteforce
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SubfinderAdapter:
+    """
+    Subfinder — Subdomain-Discovery
+    Docker: projectdiscovery/subfinder
+    Binary: https://github.com/projectdiscovery/subfinder
+
+    Findet 5–20x mehr Subdomains als reine DNS-Bruteforce.
+    Quellen: VirusTotal, Shodan, Censys, SecurityTrails, DNSdumpster,
+             AlienVault, Wayback, Certificate Transparency, ...
+    """
+
+    # Subdomains die auf exponierte Management-Interfaces hinweisen
+    HIGH_RISK_PATTERNS = {
+        "vpn", "remote", "rdp", "ssh", "admin", "portal", "owa",
+        "exchange", "webmail", "citrix", "globalprotect", "pulse",
+        "phpmyadmin", "cpanel", "whm", "plesk", "jenkins", "gitlab",
+        "jira", "confluence", "grafana", "kibana", "elastic", "mongo",
+        "redis", "postgres", "mysql", "dev", "staging", "test", "uat",
+        "scada", "plc", "hmi", "ics", "mcp", "api-internal", "internal"
+    }
+
+    def __init__(self, api_keys: dict = None):
+        """
+        api_keys: {
+            "virustotal": "...",
+            "shodan": "...",
+            "censys_id": "...",
+            "censys_secret": "...",
+            "securitytrails": "..."
+        }
+        """
+        self.api_keys = api_keys or {}
+        self.binary = "subfinder"
+
+    def run(self, tenant_id: str, domain: str, recursive: bool = False) -> list[ToolFinding]:
+        """
+        Startet Subfinder-Scan für eine Domain.
+
+        Args:
+            tenant_id: Mandanten-ID
+            domain: Ziel-Domain (z.B. "example.de")
+            recursive: Auch Subdomains von Subdomains scannen
+
+        Returns:
+            Liste von ToolFinding-Objekten
+        """
+        if not tool_available(self.binary):
+            return self._fallback_docker(tenant_id, domain)
+
+        # Konfigurationsdatei mit API-Keys erstellen
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml',
+                                         delete=False) as cfg:
+            cfg_content = self._build_config()
+            cfg.write(cfg_content)
+            cfg_path = cfg.name
+
+        try:
+            cmd = [
+                self.binary,
+                "-d", domain,
+                "-json",
+                "-silent",
+                "-all",                    # Alle Quellen nutzen
+                "-provider-config", cfg_path,
+            ]
+            if recursive:
+                cmd += ["-recursive"]
+
+            rc, stdout, stderr = _run(cmd, timeout=300)
+            return self._parse(tenant_id, domain, stdout, stderr, rc)
+
+        finally:
+            os.unlink(cfg_path)
+
+    def run_docker(self, tenant_id: str, domain: str) -> list[ToolFinding]:
+        """Fallback: Subfinder via Docker"""
+        cmd = [
+            "docker", "run", "--rm",
+            "-it",
+            "projectdiscovery/subfinder:latest",
+            "-d", domain, "-json", "-silent", "-all"
+        ]
+        rc, stdout, stderr = _run(cmd, timeout=300)
+        return self._parse(tenant_id, domain, stdout, stderr, rc)
+
+    def _fallback_docker(self, tenant_id: str, domain: str) -> list[ToolFinding]:
+        """Versucht Docker wenn Binary nicht verfügbar"""
+        if shutil.which("docker"):
+            return self.run_docker(tenant_id, domain)
+        # Kein Tool verfügbar — leere Liste
+        return [ToolFinding(
+            tenant_id=tenant_id, tool="subfinder", category="error",
+            severity="INFO", title="Subfinder nicht verfügbar",
+            description="Subfinder Binary und Docker nicht gefunden. Bitte installieren.",
+            affected_asset=domain
+        )]
+
+    def _build_config(self) -> str:
+        """Erzeugt Subfinder YAML-Config mit API-Keys"""
+        lines = []
+        if self.api_keys.get("virustotal"):
+            lines.append(f"virustotal:\n  - {self.api_keys['virustotal']}")
+        if self.api_keys.get("shodan"):
+            lines.append(f"shodan:\n  - {self.api_keys['shodan']}")
+        if self.api_keys.get("censys_id") and self.api_keys.get("censys_secret"):
+            lines.append(f"censys:\n  - {self.api_keys['censys_id']}:{self.api_keys['censys_secret']}")
+        if self.api_keys.get("securitytrails"):
+            lines.append(f"securitytrails:\n  - {self.api_keys['securitytrails']}")
+        return "\n".join(lines) if lines else ""
+
+    def _parse(self, tenant_id: str, domain: str,
+               stdout: str, stderr: str, rc: int) -> list[ToolFinding]:
+        """Parsed Subfinder JSON-Output in Findings"""
+        findings = []
+
+        for line in stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Subfinder gibt pro Zeile: {"host": "sub.domain.de", "source": "virustotal", ...}
+                entry = json.loads(line)
+                subdomain = entry.get("host", "").lower().strip()
+                if not subdomain or not subdomain.endswith(f".{domain}"):
+                    continue
+
+                # Risiko-Einstufung anhand des Subdomain-Namens
+                label = subdomain.split(".")[0]
+                severity = "HIGH" if label in self.HIGH_RISK_PATTERNS else "MEDIUM"
+                source = entry.get("source", "unknown")
+
+                # CRITICAL wenn mehrere Quellen bestätigen (echter Treffer)
+                ip = entry.get("ip", "")
+                cname = entry.get("cname", "")
+
+                # Subdomain-Takeover wenn CNAME auf externe Plattform
+                takeover_targets = ["github", "heroku", "amazonaws", "cloudfront",
+                                    "shopify", "zendesk", "ghost", "surge", "netlify"]
+                if cname and any(t in cname.lower() for t in takeover_targets):
+                    severity = "CRITICAL"
+                    title = f"Subdomain Takeover möglich: {subdomain}"
+                    desc = (f"Die Subdomain {subdomain} hat einen CNAME auf {cname}, "
+                           f"der auf eine externe Plattform zeigt die möglicherweise "
+                           f"nicht mehr aktiv ist. Subdomain-Takeover möglich.")
+                    remediation = f"CNAME {cname} entfernen oder Ressource auf Plattform neu erstellen"
+                else:
+                    title = f"{'Management-Interface' if severity == 'HIGH' else 'Subdomain'} exponiert: {subdomain}"
+                    desc = (f"Subdomain via {source} entdeckt. "
+                           f"IP: {ip or 'unbekannt'}. "
+                           f"{'Zeigt auf Management-Interface.' if severity == 'HIGH' else ''}")
+                    remediation = (f"Management-Interface '{label}' hinter VPN schützen"
+                                  if severity == "HIGH" else "Subdomain auf Notwendigkeit prüfen")
+
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id,
+                    tool="subfinder",
+                    category="subdomain",
+                    severity=severity,
+                    title=title,
+                    description=desc,
+                    affected_asset=subdomain,
+                    remediation=remediation,
+                    raw_data=entry,
+                ))
+
+            except (json.JSONDecodeError, KeyError):
+                # Subfinder gibt manchmal nur den Hostnamen (kein JSON)
+                if line and "." in line:
+                    label = line.split(".")[0]
+                    severity = "HIGH" if label in self.HIGH_RISK_PATTERNS else "MEDIUM"
+                    findings.append(ToolFinding(
+                        tenant_id=tenant_id, tool="subfinder",
+                        category="subdomain", severity=severity,
+                        title=f"Subdomain entdeckt: {line}",
+                        description=f"Subdomain {line} gefunden.",
+                        affected_asset=line,
+                    ))
+
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 2: NAABU
+# Port-Scanner — SYN-Scan, UDP, deutlich schneller als TCP-Connect
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class NaabuAdapter:
+    """
+    Naabu — Port Scanner
+    Docker: projectdiscovery/naabu
+    Binary: https://github.com/projectdiscovery/naabu
+
+    SYN-Scan (braucht root/NET_RAW): 10x schneller als TCP-Connect.
+    /24 in unter 30 Sekunden.
+    """
+
+    # Ports mit sofortigem Risiko wenn offen
+    CRITICAL_PORTS = {23, 445, 2375, 502, 102, 44818, 20000, 9600, 11001, 2379, 10250}
+    HIGH_PORTS = {22, 3306, 5432, 1433, 3389, 5900, 5985, 5986, 6379, 9200, 27017,
+                  8888, 3000, 9090, 5601, 8161, 10000, 4848, 7001, 6443, 8983}
+    MCP_PORTS = {6274, 6277, 3000, 8080, 8000, 9000, 4000, 5000}  # typische MCP-Ports
+
+    SERVICE_MAP = {
+        21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+        80: "HTTP", 443: "HTTPS", 445: "SMB", 3306: "MySQL",
+        3389: "RDP", 5432: "PostgreSQL", 5900: "VNC", 5985: "WinRM",
+        6379: "Redis", 6274: "MCP-Inspector-UI", 6277: "MCP-Inspector-Proxy",
+        8080: "HTTP-Alt (evtl. MCP)", 8443: "HTTPS-Alt", 9200: "Elasticsearch",
+        10250: "K8s-Kubelet", 27017: "MongoDB", 2375: "Docker-API",
+        2379: "etcd", 6443: "K8s-API", 502: "Modbus", 102: "S7/Siemens",
+    }
+
+    def __init__(self):
+        self.binary = "naabu"
+
+    def run(self, tenant_id: str, targets: list[str],
+            ports: str = "top-1000", rate: int = 1000,
+            nmap_integration: bool = False) -> list[ToolFinding]:
+        """
+        Args:
+            targets: Liste von IPs, Ranges oder Hostnamen
+            ports: "top-100", "top-1000", "full" oder "80,443,8080,..."
+            rate: Pakete/Sekunde (Standard: 1000, max ~10000)
+            nmap_integration: Nmap für Service-Detection nach Port-Scan
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                          delete=False) as tf:
+            tf.write("\n".join(targets))
+            target_file = tf.name
+
+        try:
+            cmd = [
+                self.binary if tool_available(self.binary) else "naabu",
+                "-list", target_file,
+                "-json",
+                "-silent",
+                "-rate", str(rate),
+                "-retries", "2",
+                "-timeout", "5000",  # ms
+            ]
+
+            if ports == "top-100":
+                cmd += ["-top-ports", "100"]
+            elif ports == "top-1000":
+                cmd += ["-top-ports", "1000"]
+            elif ports == "full":
+                cmd += ["-p", "-"]  # alle 65535 Ports
+            else:
+                cmd += ["-p", ports]
+
+            if nmap_integration:
+                cmd += ["-nmap-cli", "nmap -sV -sC"]
+
+            # Docker-Fallback
+            if not tool_available(self.binary):
+                return self._run_docker(tenant_id, targets, ports, rate)
+
+            rc, stdout, stderr = _run(cmd, timeout=600)
+            return self._parse(tenant_id, stdout, stderr, rc)
+
+        finally:
+            os.unlink(target_file)
+
+    def _run_docker(self, tenant_id, targets, ports, rate) -> list[ToolFinding]:
+        target_str = ",".join(targets)
+        port_arg = ["-top-ports", "1000"] if ports == "top-1000" else ["-p", ports]
+        cmd = ["docker", "run", "--rm", "--cap-add=NET_RAW",
+               "projectdiscovery/naabu:latest",
+               "-host", target_str, "-json", "-silent"] + port_arg
+        rc, stdout, stderr = _run(cmd, timeout=600)
+        return self._parse(tenant_id, stdout, stderr, rc)
+
+    def _parse(self, tenant_id: str, stdout: str,
+               stderr: str, rc: int) -> list[ToolFinding]:
+        findings = []
+        for line in stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Naabu: {"ip": "1.2.3.4", "port": 443, "host": "example.de"}
+                entry = json.loads(line)
+                ip = entry.get("ip", "")
+                port = entry.get("port", 0)
+                host = entry.get("host", ip)
+                asset = f"{host}:{port}"
+
+                service = self.SERVICE_MAP.get(port, f"Port {port}")
+                is_mcp = port in self.MCP_PORTS
+
+                if port in self.CRITICAL_PORTS:
+                    severity = "CRITICAL"
+                elif port in self.HIGH_PORTS:
+                    severity = "HIGH"
+                elif is_mcp:
+                    severity = "HIGH"
+                else:
+                    severity = "MEDIUM"
+
+                if is_mcp:
+                    title = f"Möglicher MCP-Server-Port offen: {asset}"
+                    desc = (f"Port {port} auf {host} ist offen. "
+                           f"Dieser Port wird häufig für MCP-Server genutzt. "
+                           f"Ohne Authentifizierung können KI-Agenten-Tools aufgerufen werden.")
+                    remediation = "MCP-Authentifizierung erzwingen oder Port hinter Firewall"
+                else:
+                    title = f"{service} exponiert: {asset}"
+                    desc = f"Port {port} ({service}) auf {host} ist offen."
+                    remediation = f"Port {port} hinter Firewall / VPN schützen"
+
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id, tool="naabu",
+                    category="mcp_exposure" if is_mcp else "port",
+                    severity=severity,
+                    title=title, description=desc,
+                    affected_asset=asset, remediation=remediation,
+                    raw_data=entry,
+                ))
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 3: THEHARVESTER
+# OSINT — E-Mails, Namen, Hosts, VHosts aus öffentlichen Quellen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TheHarvesterAdapter:
+    """
+    theHarvester — OSINT Reconnaissance
+    Repo: https://github.com/laramies/theHarvester
+
+    Sammelt aus Google, Bing, LinkedIn, GitHub, DuckDuckGo:
+    - E-Mail-Adressen (→ mit HIBP korrelieren)
+    - Mitarbeiter-Namen + Jobtitel
+    - Subdomains / Hosts
+    - Virtual Hosts
+    """
+
+    # Quellen für den Scan (kein API-Key nötig für Basis)
+    FREE_SOURCES = "bing,google,duckduckgo,crtsh,dnsdumpster,otx,sublist3r"
+    FULL_SOURCES = "bing,google,duckduckgo,linkedin,github,crtsh,dnsdumpster,otx"
+
+    def run(self, tenant_id: str, domain: str,
+            limit: int = 500, use_full_sources: bool = False) -> list[ToolFinding]:
+        """
+        Args:
+            domain: Ziel-Domain
+            limit: Maximale Anzahl Ergebnisse pro Quelle
+            use_full_sources: LinkedIn + GitHub (mehr Ergebnisse)
+        """
+        sources = self.FULL_SOURCES if use_full_sources else self.FREE_SOURCES
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            output_file = tf.name
+
+        try:
+            cmd = [
+                "theHarvester",
+                "-d", domain,
+                "-b", sources,
+                "-l", str(limit),
+                "-f", output_file.replace(".json", ""),  # theHarvester fügt .json hinzu
+                "--dns-lookup",
+            ]
+
+            rc, stdout, stderr = _run(cmd, timeout=300)
+            return self._parse_json(tenant_id, domain, output_file, stdout)
+
+        finally:
+            for ext in [".json", ".xml"]:
+                path = output_file.replace(".json", ext)
+                if os.path.exists(path):
+                    os.unlink(path)
+
+    def _parse_json(self, tenant_id: str, domain: str,
+                    json_file: str, stdout: str) -> list[ToolFinding]:
+        findings = []
+        data = {}
+
+        # JSON-Datei lesen
+        try:
+            with open(json_file) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Fallback: stdout parsen
+            data = self._parse_stdout(stdout)
+
+        # E-Mail-Adressen
+        emails = data.get("emails", [])
+        if emails:
+            # Alle E-Mails der Domain sammeln
+            domain_emails = [e for e in emails if f"@{domain}" in e.lower()]
+            external_emails = [e for e in emails if f"@{domain}" not in e.lower()]
+
+            if domain_emails:
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id, tool="theharvester",
+                    category="email",
+                    severity="MEDIUM",
+                    title=f"{len(domain_emails)} Mitarbeiter-E-Mails öffentlich bekannt",
+                    description=(
+                        f"{len(domain_emails)} @{domain} E-Mail-Adressen aus öffentlichen Quellen geerntet. "
+                        f"Diese sollten gegen HIBP/Stealer-Logs geprüft werden.\n"
+                        f"Beispiele: {', '.join(domain_emails[:5])}"
+                        f"{'...' if len(domain_emails) > 5 else ''}"
+                    ),
+                    affected_asset=domain,
+                    remediation="E-Mails gegen HIBP prüfen, Passwort-Reset-Kampagne, Security-Awareness-Training",
+                    raw_data={"emails": domain_emails},
+                ))
+
+        # Hosts / Subdomains
+        hosts = data.get("hosts", []) or data.get("subdomains", [])
+        new_hosts = [h for h in hosts if h.endswith(f".{domain}")]
+        if new_hosts:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="theharvester",
+                category="subdomain",
+                severity="LOW",
+                title=f"{len(new_hosts)} zusätzliche Hosts über OSINT gefunden",
+                description=(
+                    f"theHarvester hat {len(new_hosts)} Hosts für {domain} in öffentlichen Quellen gefunden.\n"
+                    f"Hosts: {', '.join(new_hosts[:10])}"
+                ),
+                affected_asset=domain,
+                remediation="Hosts auf Notwendigkeit und Sicherheit prüfen",
+                raw_data={"hosts": new_hosts},
+            ))
+
+        # LinkedIn-Mitarbeiter (wenn verfügbar)
+        linkedin = data.get("linkedin_links", []) or data.get("people", [])
+        if linkedin:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="theharvester",
+                category="osint",
+                severity="LOW",
+                title=f"{len(linkedin)} LinkedIn-Profile öffentlich gefunden",
+                description=(
+                    f"theHarvester hat {len(linkedin)} mit {domain} verknüpfte LinkedIn-Profile gefunden.\n"
+                    f"Diese Personen sind potenzielle Spear-Phishing-Ziele wenn kombiniert mit Credential-Leaks."
+                ),
+                affected_asset=domain,
+                remediation="LinkedIn-Exposition ist normal, aber Kombination mit HIBP-Daten beachten",
+                raw_data={"linkedin": linkedin[:20]},
+            ))
+
+        # Interessante IPs
+        ips = data.get("ips", [])
+        if ips:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="theharvester",
+                category="ip",
+                severity="INFO",
+                title=f"{len(ips)} IP-Adressen via OSINT identifiziert",
+                description=f"IPs: {', '.join(ips[:10])}",
+                affected_asset=domain,
+                raw_data={"ips": ips},
+            ))
+
+        return findings
+
+    def _parse_stdout(self, stdout: str) -> dict:
+        """Fallback: Parst stdout wenn JSON-Datei nicht erstellt wurde"""
+        result = {"emails": [], "hosts": [], "ips": []}
+        email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
+        result["emails"] = list(set(email_pattern.findall(stdout)))
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 4: HTTPX
+# HTTP-Probing mit Screenshots, Favicon-Hash, Technologie-Fingerprinting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HTTPXAdapter:
+    """
+    HTTPX — HTTP Probing & Fingerprinting
+    Docker: projectdiscovery/httpx
+    Binary: https://github.com/projectdiscovery/httpx
+
+    Ermöglicht:
+    - Screenshot via headless Chrome
+    - Favicon-Hash (Shodan-kompatibel)
+    - Wappalyzer-Technologie-Erkennung
+    - CDN-Erkennung
+    - Content-Hash für Änderungs-Detection
+    """
+
+    # Bekannte problematische Technologien in Responses
+    RISKY_TECH = {
+        "WordPress": ("MEDIUM", "WordPress-Version prüfen, Updates sicherstellen"),
+        "PHP": ("MEDIUM", "PHP-Version prüfen, keine Debug-Info in Produktion"),
+        "ASP.NET": ("LOW", "ASP.NET-Version und Fehlerseiten prüfen"),
+        "Apache": ("LOW", "Apache-Version in Server-Header verbergen"),
+        "nginx": ("LOW", "nginx-Version in Server-Header verbergen"),
+        "IIS": ("MEDIUM", "IIS-Version prüfen, HTTP-Error-Seiten konfigurieren"),
+        "Laravel": ("MEDIUM", "APP_DEBUG=false in Produktion sicherstellen"),
+        "Django": ("LOW", "DEBUG=False in Produktion sicherstellen"),
+        "Spring Boot": ("HIGH", "Actuator-Endpoints deaktivieren oder absichern"),
+        "Tomcat": ("MEDIUM", "Tomcat-Manager-Interface abschalten oder schützen"),
+    }
+
+    # Security-Header die fehlen sollten als Finding gemeldet werden
+    REQUIRED_HEADERS = {
+        "Strict-Transport-Security": ("MEDIUM", "HSTS aktivieren"),
+        "Content-Security-Policy": ("MEDIUM", "CSP-Header setzen"),
+        "X-Frame-Options": ("LOW", "Clickjacking-Schutz aktivieren"),
+        "X-Content-Type-Options": ("LOW", "MIME-Sniffing deaktivieren"),
+    }
+
+    def __init__(self, screenshot_dir: str = "/tmp/easm_screenshots"):
+        self.binary = "httpx"
+        self.screenshot_dir = screenshot_dir
+        os.makedirs(screenshot_dir, exist_ok=True)
+
+    def run(self, tenant_id: str, urls: list[str],
+            take_screenshots: bool = True,
+            threads: int = 50) -> list[ToolFinding]:
+        """
+        Args:
+            urls: Liste von URLs oder hosts (httpx fügt http/https hinzu)
+            take_screenshots: headless Chrome Screenshots (braucht Chrome)
+            threads: Parallelität
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                          delete=False) as tf:
+            tf.write("\n".join(urls))
+            input_file = tf.name
+
+        try:
+            cmd = [
+                self.binary if tool_available(self.binary) else "httpx",
+                "-l", input_file,
+                "-json",
+                "-silent",
+                "-threads", str(threads),
+                "-follow-redirects",
+                "-max-redirects", "5",
+                "-tech-detect",          # Wappalyzer-Fingerprinting
+                "-title",                # Page-Title
+                "-status-code",
+                "-content-length",
+                "-content-type",
+                "-web-server",           # Server-Header
+                "-cdn",                  # CDN-Erkennung
+                "-tls-probe",            # TLS-Info
+                "-hash", "sha256",       # Content-Hash für Änderungs-Detection
+                "-favicon",              # Favicon-Hash
+                "-response-in-json",     # Body in JSON (limitiert)
+                "-include-response-header",
+            ]
+
+            if take_screenshots and shutil.which("chromium") or shutil.which("google-chrome"):
+                cmd += ["-screenshot", "-screenshot-type", "jpeg",
+                        "-screenshot-timeout", "10"]
+
+            if not tool_available(self.binary):
+                return self._run_docker(tenant_id, urls, take_screenshots)
+
+            rc, stdout, stderr = _run(cmd, timeout=600)
+            return self._parse(tenant_id, stdout, stderr, rc)
+
+        finally:
+            os.unlink(input_file)
+
+    def _run_docker(self, tenant_id, urls, screenshots) -> list[ToolFinding]:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+            tf.write("\n".join(urls))
+            input_file = tf.name
+        try:
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{input_file}:/targets.txt:ro",
+                "projectdiscovery/httpx:latest",
+                "-l", "/targets.txt", "-json", "-silent",
+                "-tech-detect", "-title", "-status-code",
+                "-web-server", "-cdn", "-favicon"
+            ]
+            rc, stdout, stderr = _run(cmd, timeout=600)
+            return self._parse(tenant_id, stdout, stderr, rc)
+        finally:
+            os.unlink(input_file)
+
+    def _parse(self, tenant_id: str, stdout: str,
+               stderr: str, rc: int) -> list[ToolFinding]:
+        findings = []
+        for line in stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                url = entry.get("url", "")
+                host = entry.get("host", url)
+                status = entry.get("status-code", 0)
+                tech = entry.get("tech", []) or []
+                server = entry.get("webserver", "")
+                title = entry.get("title", "")
+                cdn = entry.get("cdn", False)
+                content_hash = entry.get("hash", {}).get("body-sha256", "")
+                favicon_hash = entry.get("favicon-mmh3", "")
+
+                headers = entry.get("headers", {})
+
+                # 1. Fehlende Security-Header
+                missing_headers = []
+                for header, (sev, remediation) in self.REQUIRED_HEADERS.items():
+                    if header.lower() not in {k.lower() for k in headers}:
+                        missing_headers.append(header)
+
+                if missing_headers:
+                    findings.append(ToolFinding(
+                        tenant_id=tenant_id, tool="httpx",
+                        category="http",
+                        severity="MEDIUM" if "Strict-Transport-Security" in missing_headers else "LOW",
+                        title=f"Fehlende Security-Header: {url}",
+                        description=f"Folgende Security-Header fehlen: {', '.join(missing_headers)}",
+                        affected_asset=url,
+                        remediation="Security-Header in Web-Server-Konfiguration setzen",
+                        raw_data={"missing_headers": missing_headers, "all_headers": headers},
+                    ))
+
+                # 2. Technologie-Fingerprinting
+                for t in tech:
+                    t_name = t.split(":")[0] if ":" in t else t
+                    if t_name in self.RISKY_TECH:
+                        sev, rem = self.RISKY_TECH[t_name]
+                        findings.append(ToolFinding(
+                            tenant_id=tenant_id, tool="httpx",
+                            category="http",
+                            severity=sev,
+                            title=f"{t_name} erkannt: {url}",
+                            description=f"Technologie-Stack: {', '.join(tech)}. Version: {t}",
+                            affected_asset=url,
+                            remediation=rem,
+                            raw_data={"tech": tech, "server": server, "title": title},
+                        ))
+
+                # 3. Interessante Status-Codes
+                if status in (200, 301, 302):
+                    # Screenshot-Info
+                    screenshot_path = entry.get("screenshot", {}).get("path", "")
+
+                    findings.append(ToolFinding(
+                        tenant_id=tenant_id, tool="httpx",
+                        category="http",
+                        severity="INFO",
+                        title=f"HTTP-Service aktiv: {url} [{status}]",
+                        description=(
+                            f"Title: {title or 'N/A'} | Server: {server or 'N/A'} | "
+                            f"Tech: {', '.join(tech[:3]) or 'unbekannt'} | "
+                            f"CDN: {'Ja' if cdn else 'Nein'} | "
+                            f"Content-Hash: {content_hash[:16] if content_hash else 'N/A'}"
+                        ),
+                        affected_asset=url,
+                        raw_data={
+                            "status": status, "tech": tech, "server": server,
+                            "title": title, "cdn": cdn, "favicon_hash": favicon_hash,
+                            "content_hash": content_hash,
+                            "screenshot": screenshot_path
+                        },
+                    ))
+
+                # 4. Kritische Endpunkte in Title erkannt
+                critical_titles = [
+                    "jenkins", "grafana", "kibana", "prometheus", "sonarqube",
+                    "gitlab", "jupyter", "phpmyadmin", "adminer", "webmin",
+                    "mcp inspector", "claude", "openai"
+                ]
+                if title and any(ct in title.lower() for ct in critical_titles):
+                    matched = next(ct for ct in critical_titles if ct in title.lower())
+                    findings.append(ToolFinding(
+                        tenant_id=tenant_id, tool="httpx",
+                        category="exposed_service",
+                        severity="HIGH",
+                        title=f"Admin-Interface exponiert: {matched.title()} auf {url}",
+                        description=f"Page-Title '{title}' weist auf exponiertes Admin-Interface hin.",
+                        affected_asset=url,
+                        remediation=f"{matched.title()} hinter VPN/Bastion-Host schützen",
+                        raw_data=entry,
+                    ))
+
+            except (json.JSONDecodeError, KeyError, StopIteration):
+                pass
+
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 5: NUCLEI
+# Vulnerability Scanner — 7000+ Templates inkl. API, MCP, CVEs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class NucleiAdapter:
+    """
+    Nuclei — Template-basierter Vulnerability Scanner
+    Docker: projectdiscovery/nuclei
+    Binary: https://github.com/projectdiscovery/nuclei
+
+    Templates:
+    - api/          → Swagger, GraphQL, Actuator, .env, CORS, .git
+    - mcp/          → MCP-Server ohne Auth, MCP Inspector, mcp.json
+    - cves/         → Bekannte CVEs mit öffentlichem Exploit
+    - default-logins/ → Default-Credentials
+    - exposures/    → Sensitive Dateien exponiert
+    - misconfigs/   → Fehlkonfigurationen
+    """
+
+    # Template-Kategorien mit Schweregrad-Mapping
+    TEMPLATE_SEVERITY = {
+        "critical": "CRITICAL",
+        "high": "HIGH",
+        "medium": "MEDIUM",
+        "low": "LOW",
+        "info": "INFO",
+        "unknown": "MEDIUM",
+    }
+
+    # Nuclei-Tags für MCP-spezifische Checks
+    MCP_TAGS = "mcp,mcp-server,mcp-inspector,model-context-protocol"
+
+    def run(self, tenant_id: str, targets: list[str],
+            template_dirs: list[str] = None,
+            tags: str = None,
+            severity_filter: str = "low,medium,high,critical",
+            rate_limit: int = 100,
+            bulk_size: int = 25) -> list[ToolFinding]:
+        """
+        Args:
+            targets: URLs oder IPs
+            template_dirs: Spezifische Template-Verzeichnisse
+            tags: Komma-separierte Tags (z.B. "api,mcp,cve")
+            severity_filter: Nur diese Schweregrade
+            rate_limit: Requests/Sekunde
+            bulk_size: Parallele Targets
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                          delete=False) as tf:
+            tf.write("\n".join(targets))
+            target_file = tf.name
+
+        try:
+            # Standard-Templates wenn keine angegeben
+            if not template_dirs and not tags:
+                tags = "api,exposure,misconfig,default-login,mcp"
+
+            cmd = [
+                self.binary if tool_available(self.binary) else "nuclei",
+                "-l", target_file,
+                "-json",
+                "-silent",
+                "-severity", severity_filter,
+                "-rate-limit", str(rate_limit),
+                "-bulk-size", str(bulk_size),
+                "-timeout", "10",
+                "-retries", "1",
+                "-no-color",
+            ]
+
+            if template_dirs:
+                for td in template_dirs:
+                    cmd += ["-t", td]
+            if tags:
+                cmd += ["-tags", tags]
+
+            # Template-Updates (einmalig pro Session)
+            cmd += ["-ud"]  # update templates if needed
+
+            if not tool_available(self.binary):
+                return self._run_docker(tenant_id, targets, tags, severity_filter)
+
+            rc, stdout, stderr = _run(cmd, timeout=900)
+            return self._parse(tenant_id, stdout, stderr, rc)
+
+        finally:
+            os.unlink(target_file)
+
+    def run_mcp_scan(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
+        """Spezialisierter MCP-Scan mit MCP-spezifischen Templates"""
+        # Erweiterte Ports für MCP-Scanner
+        mcp_targets = []
+        for t in targets:
+            for port in [3000, 6274, 6277, 8000, 8080, 9000]:
+                mcp_targets.append(f"http://{t}:{port}")
+                mcp_targets.append(f"https://{t}:{port}")
+
+        findings = self.run(
+            tenant_id=tenant_id,
+            targets=mcp_targets + targets,
+            tags=self.MCP_TAGS + ",api,exposure",
+            severity_filter="low,medium,high,critical",
+        )
+
+        # Zusätzlich: manuelle MCP-Handshake-Checks
+        findings += self._check_mcp_handshake(tenant_id, targets)
+        return findings
+
+    def _check_mcp_handshake(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
+        """
+        Prüft ob MCP-Server ohne Authentifizierung erreichbar sind.
+        Sendet einen MCP JSON-RPC initialize-Request.
+        """
+        import urllib.request
+        import urllib.error
+
+        findings = []
+        mcp_initialize = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "easm-scanner", "version": "1.0"}
+            }
+        }).encode()
+
+        # Typische MCP-Ports und Endpunkte
+        mcp_endpoints = [
+            ("/mcp", 8080), ("/mcp", 3000), ("/mcp", 8000),
+            ("/sse", 6277), ("/", 6274),   # MCP Inspector
+            ("/mcp", 9000), ("/api/mcp", 8080),
+        ]
+
+        for target in targets:
+            host = target.replace("http://", "").replace("https://", "").split("/")[0]
+            for path, port in mcp_endpoints:
+                for scheme in ["http", "https"]:
+                    url = f"{scheme}://{host}:{port}{path}"
+                    try:
+                        req = urllib.request.Request(
+                            url,
+                            data=mcp_initialize,
+                            headers={
+                                "Content-Type": "application/json",
+                                "User-Agent": "EASM-Scanner/1.0"
+                            },
+                            method="POST"
+                        )
+                        # Selbstsignierte Zertifikate akzeptieren
+                        import ssl
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+
+                        with urllib.request.urlopen(req, timeout=3, context=ctx) as resp:
+                            body = resp.read().decode(errors="ignore")
+                            if '"jsonrpc"' in body and '"result"' in body:
+                                # MCP-Server antwortet ohne Auth!
+                                resp_data = json.loads(body)
+                                server_info = resp_data.get("result", {}).get("serverInfo", {})
+                                capabilities = resp_data.get("result", {}).get("capabilities", {})
+
+                                findings.append(ToolFinding(
+                                    tenant_id=tenant_id,
+                                    tool="nuclei",
+                                    category="mcp_exposure",
+                                    severity="CRITICAL",
+                                    title=f"MCP-Server ohne Authentifizierung: {url}",
+                                    description=(
+                                        f"MCP-Server auf {url} antwortet auf initialize-Requests "
+                                        f"OHNE Authentifizierung. "
+                                        f"Server: {server_info.get('name', 'unbekannt')} "
+                                        f"v{server_info.get('version', '?')}. "
+                                        f"Capabilities: {list(capabilities.keys())}. "
+                                        f"Ein Angreifer kann alle verfügbaren Tools (tools/list) "
+                                        f"auflisten und aufrufen — inkl. Filesystem, Shell, DB-Zugriff."
+                                    ),
+                                    affected_asset=url,
+                                    remediation=(
+                                        "Bearer-Token-Authentifizierung aktivieren. "
+                                        "Produktions-MCP-Server nie auf 0.0.0.0 binden. "
+                                        "MCP Inspector nie in Produktion betreiben."
+                                    ),
+                                    raw_data={"response": resp_data, "url": url},
+                                ))
+                    except Exception:
+                        pass  # Port nicht offen oder Auth vorhanden
+
+        return findings
+
+    def _run_docker(self, tenant_id, targets, tags, severity) -> list[ToolFinding]:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
+            tf.write("\n".join(targets))
+            target_file = tf.name
+        try:
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{target_file}:/targets.txt:ro",
+                "projectdiscovery/nuclei:latest",
+                "-l", "/targets.txt", "-json", "-silent",
+                "-severity", severity,
+            ]
+            if tags:
+                cmd += ["-tags", tags]
+            rc, stdout, stderr = _run(cmd, timeout=900)
+            return self._parse(tenant_id, stdout, stderr, rc)
+        finally:
+            os.unlink(target_file)
+
+    def _parse(self, tenant_id: str, stdout: str,
+               stderr: str, rc: int) -> list[ToolFinding]:
+        findings = []
+        for line in stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                template_id = entry.get("template-id", "unknown")
+                name = entry.get("info", {}).get("name", template_id)
+                severity_raw = entry.get("info", {}).get("severity", "medium")
+                severity = self.TEMPLATE_SEVERITY.get(severity_raw.lower(), "MEDIUM")
+                matched_at = entry.get("matched-at", entry.get("host", ""))
+                description = entry.get("info", {}).get("description", "")
+                remediation = entry.get("info", {}).get("remediation", "")
+                cve_list = entry.get("info", {}).get("classification", {}).get("cve-id", [])
+                cve_id = cve_list[0] if cve_list else ""
+                cvss = entry.get("info", {}).get("classification", {}).get("cvss-score", 0.0)
+                tags_list = entry.get("info", {}).get("tags", [])
+
+                is_mcp = any(t in ["mcp", "mcp-server", "model-context-protocol"]
+                            for t in tags_list)
+                category = "mcp_exposure" if is_mcp else (
+                    "cve" if cve_id else "vulnerability"
+                )
+
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id, tool="nuclei",
+                    category=category,
+                    severity=severity,
+                    title=f"[{template_id}] {name}",
+                    description=description or f"Nuclei-Template {template_id} angeschlagen.",
+                    affected_asset=matched_at,
+                    remediation=remediation,
+                    cve_id=cve_id,
+                    cvss_score=float(cvss) if cvss else 0.0,
+                    raw_data=entry,
+                ))
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 6: RAMPARTS
+# MCP-Security-Scanner — spezialisiert auf MCP-Server-Schwachstellen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class RampartsAdapter:
+    """
+    Ramparts — MCP Security Scanner
+    Repo: https://github.com/getjavelin/ramparts
+    Install: pip install ramparts
+
+    Scannt MCP-Server auf:
+    - Tool-Poisoning (Prompt-Injection in Tool-Descriptions)
+    - Gefährliche Tool-Typen (shell, exec, filesystem)
+    - Command Injection via YARA-Regeln
+    - Cross-Domain-Tool-Spans (Context-Hijacking)
+    - LLM-gestützte Analyse der Tool-Sicherheit
+    """
+
+    # Gefährliche Tool-Name-Pattern (Regex)
+    DANGEROUS_TOOL_PATTERNS = [
+        r"(execute|exec|run|shell|cmd|command|bash|sh|powershell)",
+        r"(delete|remove|rm|unlink|truncate).*file",
+        r"(write|overwrite|create).*file",
+        r"(eval|dynamic.*code|inject)",
+        r"(sudo|privilege|root|admin)",
+    ]
+
+    # Prompt-Injection-Patterns in Tool-Descriptions
+    INJECTION_PATTERNS = [
+        r"ignore\s+(previous|all|above)\s+instructions",
+        r"do\s+not\s+follow\s+(safety|security|policy)",
+        r"you\s+are\s+now\s+in\s+(dev|test|admin|sudo)\s+mode",
+        r"reveal\s+(secret|password|credential|token|key)",
+        r"exfiltrate|send.*to.*http|post.*to.*server",
+        r"<\!--.*instruction.*-->",
+        r"\[system\]|\[admin\]|\[override\]",
+    ]
+
+    def run(self, tenant_id: str, mcp_urls: list[str],
+            use_llm: bool = False) -> list[ToolFinding]:
+        """
+        Args:
+            mcp_urls: Liste von MCP-Server-URLs
+            use_llm: LLM-gestützte Analyse (braucht API-Key)
+        """
+        all_findings = []
+
+        for url in mcp_urls:
+            # Primär: ramparts CLI wenn installiert
+            if tool_available("ramparts"):
+                all_findings += self._run_ramparts_cli(tenant_id, url, use_llm)
+            else:
+                # Fallback: Eigene MCP-Security-Analyse
+                all_findings += self._run_own_analysis(tenant_id, url)
+
+        return all_findings
+
+    def _run_ramparts_cli(self, tenant_id: str, url: str,
+                           use_llm: bool) -> list[ToolFinding]:
+        """Ramparts CLI ausführen"""
+        cmd = ["ramparts", "scan", url, "--json"]
+        if use_llm:
+            cmd += ["--llm-analysis"]
+
+        rc, stdout, stderr = _run(cmd, timeout=120)
+        return self._parse_ramparts(tenant_id, url, stdout, stderr, rc)
+
+    def _parse_ramparts(self, tenant_id: str, url: str,
+                         stdout: str, stderr: str, rc: int) -> list[ToolFinding]:
+        """Parsed Ramparts-JSON-Output"""
+        findings = []
+        try:
+            data = json.loads(stdout)
+            for issue in data.get("findings", []):
+                sev = issue.get("severity", "medium").upper()
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id, tool="ramparts",
+                    category="mcp_exposure",
+                    severity=sev,
+                    title=issue.get("title", "MCP Security Issue"),
+                    description=issue.get("description", ""),
+                    affected_asset=url,
+                    remediation=issue.get("remediation", ""),
+                    raw_data=issue,
+                ))
+        except (json.JSONDecodeError, KeyError):
+            pass
+        return findings
+
+    def _run_own_analysis(self, tenant_id: str, url: str) -> list[ToolFinding]:
+        """
+        Eigene MCP-Sicherheitsanalyse wenn ramparts nicht installiert.
+        Prüft: Tool-Liste, gefährliche Tools, Prompt-Injection, Authentifizierung
+        """
+        import urllib.request
+        import ssl
+
+        findings = []
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        def mcp_request(method: str, params: dict = None) -> dict:
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": method,
+                "params": params or {}
+            }).encode()
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json",
+                         "User-Agent": "EASM-Ramparts/1.0"},
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+                    return json.loads(resp.read().decode(errors="ignore"))
+            except Exception:
+                return {}
+
+        # 1. Initialize-Check (Auth?)
+        init_resp = mcp_request("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "scanner", "version": "1.0"}
+        })
+
+        if not init_resp.get("result"):
+            return findings  # Server antwortet nicht oder hat Auth
+
+        server_info = init_resp.get("result", {}).get("serverInfo", {})
+
+        # 2. Tools auflisten
+        tools_resp = mcp_request("tools/list")
+        tools = tools_resp.get("result", {}).get("tools", [])
+
+        if not tools:
+            return findings
+
+        # 3. Jedes Tool analysieren
+        dangerous_tools = []
+        injection_tools = []
+
+        for tool in tools:
+            tool_name = tool.get("name", "")
+            tool_desc = tool.get("description", "")
+            tool_schema = json.dumps(tool.get("inputSchema", {}))
+
+            # Gefährliche Tool-Namen
+            for pattern in self.DANGEROUS_TOOL_PATTERNS:
+                if re.search(pattern, tool_name + " " + tool_desc, re.IGNORECASE):
+                    dangerous_tools.append({
+                        "name": tool_name,
+                        "description": tool_desc[:200],
+                        "pattern": pattern
+                    })
+                    break
+
+            # Prompt-Injection in Beschreibungen
+            for pattern in self.INJECTION_PATTERNS:
+                if re.search(pattern, tool_desc, re.IGNORECASE):
+                    injection_tools.append({
+                        "name": tool_name,
+                        "suspicious_text": tool_desc[:200],
+                        "pattern": pattern
+                    })
+                    break
+
+            # Datenbank-Connection-Strings in Schema
+            conn_pattern = r"(postgresql|mysql|mongodb|redis|mssql)://[^\s\"]+"
+            if re.search(conn_pattern, tool_schema, re.IGNORECASE):
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id, tool="ramparts",
+                    category="mcp_exposure",
+                    severity="CRITICAL",
+                    title=f"DB-Connection-String in MCP-Tool exponiert: {tool_name}",
+                    description=f"Tool '{tool_name}' enthält Datenbank-Connection-Strings im Schema.",
+                    affected_asset=url,
+                    remediation="Connection-Strings aus Tool-Schema entfernen, Vault nutzen",
+                    raw_data={"tool": tool},
+                ))
+
+        # 4. Gefährliche Tools Finding
+        if dangerous_tools:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="ramparts",
+                category="mcp_exposure",
+                severity="CRITICAL",
+                title=f"{len(dangerous_tools)} gefährliche Tool-Typen in MCP-Server: {url}",
+                description=(
+                    f"Der MCP-Server exponiert Tools die shell/filesystem/code-execution ermöglichen:\n"
+                    + "\n".join(f"- {t['name']}: {t['description'][:80]}"
+                               for t in dangerous_tools[:5])
+                ),
+                affected_asset=url,
+                remediation=(
+                    "Nur notwendige Tools exponieren. Shell/Exec-Tools nicht über Netzwerk zugänglich machen. "
+                    "Least-Privilege: MCP-Server nur mit minimalen Rechten betreiben."
+                ),
+                raw_data={"dangerous_tools": dangerous_tools},
+            ))
+
+        # 5. Prompt-Injection Finding
+        if injection_tools:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="ramparts",
+                category="mcp_exposure",
+                severity="HIGH",
+                title=f"Prompt-Injection in MCP-Tool-Descriptions: {url}",
+                description=(
+                    f"Tool-Descriptions enthalten potenzielle Prompt-Injection-Anweisungen:\n"
+                    + "\n".join(f"- {t['name']}: {t['suspicious_text'][:80]}"
+                               for t in injection_tools[:3])
+                ),
+                affected_asset=url,
+                remediation="Tool-Descriptions auf Injection-Anweisungen prüfen. Tool-Poisoning Supply-Chain-Check.",
+                raw_data={"injection_tools": injection_tools},
+            ))
+
+        # 6. Vollständiges Tool-Inventar als INFO-Finding
+        if tools:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id, tool="ramparts",
+                category="mcp_exposure",
+                severity="HIGH",
+                title=f"MCP-Server exponiert {len(tools)} Tools ohne Auth: {url}",
+                description=(
+                    f"Server: {server_info.get('name', '?')} v{server_info.get('version', '?')}\n"
+                    f"Tools: {', '.join(t.get('name','?') for t in tools[:10])}"
+                    f"{'...' if len(tools) > 10 else ''}"
+                ),
+                affected_asset=url,
+                remediation="Bearer-Token-Authentifizierung aktivieren, MCP-Server nicht auf 0.0.0.0 binden",
+                raw_data={"tools": tools[:20], "server_info": server_info},
+            ))
+
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 7: SPYONWEB
+# Reverse-OSINT: Analytics-IDs / AdSense / IP → verbundene Domains
+# Einzigartiger Mehrwert: findet Shadow-Domains über gemeinsame Tracking-IDs
+# API: https://api.spyonweb.com/v1/
+# Kosten: ab $29/Monat für produktive API-Nutzung
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SpyOnWebAdapter:
+    """
+    SpyOnWeb — Reverse-OSINT via Analytics-IDs, AdSense-Codes und IP-Sharing.
+
+    Findet Domains die:
+    - dieselbe Google Analytics ID teilen  (UA-XXXXX-X / G-XXXXXXXXXX)
+    - denselben Google AdSense Code teilen (pub-XXXXXXXXXX)
+    - auf derselben IP-Adresse gehostet sind
+
+    MSSP-Mehrwert:
+    - Kunden wissen oft nicht, dass Schwester-Unternehmen dieselbe
+      Analytics-ID nutzen → Shadow-Domains ohne Asset-Inventar
+    - Shared-Hosting: Risiko durch Nachbarn auf derselben IP
+    - Typosquatting: Angreifer-Domains die dieselbe ID wie Kunden nutzen
+    """
+
+    BASE = "https://api.spyonweb.com/v1"
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def run(self, tenant_id: str, domain: str,
+            ips: list[str] = None) -> list[ToolFinding]:
+        """
+        Vollständige SpyOnWeb-Analyse für eine Domain.
+        1. Domain-Summary → extrahiert Analytics-IDs + AdSense-Codes + IP
+        2. Reverse-Lookup jeder ID → verbundene Domains
+        3. IP-Sharing-Check → andere Domains auf derselben IP
+        """
+        findings = []
+
+        # 1. Domain-Summary abrufen
+        summary = self._get("/summary/{domain}".format(domain=domain))
+        if not summary:
+            return findings
+
+        result = summary.get("result", {}).get(domain, {})
+
+        # Analytics-IDs extrahieren
+        ua_ids = list(result.get("analytics", {}).keys())
+        adsense_ids = list(result.get("adsense", {}).keys())
+        domain_ips = list(result.get("ip", {}).keys())
+
+        # 2. Für jede Analytics-ID alle verbundenen Domains finden
+        for ua_id in ua_ids[:5]:  # max 5 IDs pro Domain
+            linked = self._reverse_lookup("analytics", ua_id, domain)
+            if linked:
+                findings.extend(self._make_findings(
+                    tenant_id, domain, ua_id, linked,
+                    "google_analytics", "Analytics-ID"
+                ))
+
+        # 3. AdSense-IDs
+        for pub_id in adsense_ids[:3]:
+            linked = self._reverse_lookup("adsense", pub_id, domain)
+            if linked:
+                findings.extend(self._make_findings(
+                    tenant_id, domain, pub_id, linked,
+                    "adsense", "AdSense-Publisher-ID"
+                ))
+
+        # 4. IP-Sharing (eigene IPs + aus Port-Scan übergebene)
+        all_ips = list(set(domain_ips + (ips or [])))
+        for ip in all_ips[:5]:
+            linked = self._reverse_lookup("ip", ip, domain)
+            if linked:
+                findings.append(ToolFinding(
+                    tenant_id=tenant_id,
+                    tool="spyonweb",
+                    category="shared_hosting",
+                    severity="LOW",
+                    title=f"Shared-Hosting: {len(linked)} Domains auf {ip}",
+                    description=(
+                        f"Auf der IP {ip} von {domain} hosten {len(linked)} weitere Domains. "
+                        f"Kompromittierte Nachbar-Domain kann Angriffe auf geteilte Infrastruktur ermöglichen.\n"
+                        f"Domains: {', '.join(linked[:8])}"
+                        f"{'...' if len(linked) > 8 else ''}"
+                    ),
+                    affected_asset=ip,
+                    remediation=(
+                        "Wenn möglich: dedizierte IP statt Shared-Hosting für kritische Services. "
+                        "Nachbar-Domains auf Ruf und Sicherheitsstatus prüfen."
+                    ),
+                    raw_data={"ip": ip, "shared_domains": linked[:30]},
+                ))
+
+        return findings
+
+    def _get(self, path: str) -> dict:
+        """Führt einen SpyOnWeb-API-Request aus."""
+        import urllib.request, urllib.error
+        url = f"{self.BASE}{path}?access_token={self.api_key}"
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "EASM-MSSP/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 402:
+                return {"error": "api_quota_exceeded"}
+            if e.code == 404:
+                return {}
+            return {}
+        except Exception:
+            return {}
+
+    def _reverse_lookup(self, kind: str, id_: str,
+                         origin_domain: str) -> list[str]:
+        """
+        Reverse-Lookup für Analytics-ID / AdSense-ID / IP.
+        Returns: Liste verbundener Domains (ohne origin_domain selbst)
+        """
+        data = self._get(f"/{kind}/{id_}")
+        if not data:
+            return []
+        result = data.get("result", {}).get(id_, {})
+        items = result.get("items", {})
+        if isinstance(items, dict):
+            domains = [d for d in items if d != origin_domain]
+        elif isinstance(items, list):
+            domains = [d for d in items if d != origin_domain]
+        else:
+            domains = []
+        return domains
+
+    def _make_findings(self, tenant_id: str, origin: str,
+                        tracking_id: str, linked_domains: list[str],
+                        id_type: str, id_label: str) -> list[ToolFinding]:
+        """Erzeugt Findings für verbundene Domains via Tracking-ID."""
+        findings = []
+        if not linked_domains:
+            return findings
+
+        # Klassifikation der verbundenen Domains
+        suspicious = [
+            d for d in linked_domains
+            if any(kw in d.lower() for kw in
+                   ["phish", "fake", "scam", "malware", "clone", "login-"])
+        ]
+        external = [
+            d for d in linked_domains
+            if not d.endswith(f".{origin}") and d != origin
+        ]
+
+        severity = "HIGH" if suspicious else ("MEDIUM" if external else "LOW")
+
+        findings.append(ToolFinding(
+            tenant_id=tenant_id,
+            tool="spyonweb",
+            category="linked_domains",
+            severity=severity,
+            title=(
+                f"SpyOnWeb: {len(linked_domains)} Domains teilen {id_label} "
+                f"'{tracking_id}' mit {origin}"
+            ),
+            description=(
+                f"Die {id_label} '{tracking_id}' wird auch von "
+                f"{len(linked_domains)} anderen Domains genutzt.\n"
+                f"Verbundene Domains: {', '.join(linked_domains[:10])}"
+                f"{'...' if len(linked_domains) > 10 else ''}\n"
+                + (f"\n⚠ Verdächtige Domains: {', '.join(suspicious)}"
+                   if suspicious else "")
+            ),
+            affected_asset=origin,
+            remediation=(
+                "Verbundene Domains prüfen ob sie zur eigenen Organisation gehören "
+                "oder ob Tracking-IDs in fremden (ggf. bösartigen) Domains missbraucht werden. "
+                "Nicht mehr benötigte Tracking-IDs aus dem Code entfernen."
+            ),
+            raw_data={
+                "tracking_id": tracking_id,
+                "id_type": id_type,
+                "linked_domains": linked_domains[:50],
+                "suspicious_count": len(suspicious),
+            },
+        ))
+
+        # Separates CRITICAL-Finding für verdächtige Domains
+        if suspicious:
+            findings.append(ToolFinding(
+                tenant_id=tenant_id,
+                tool="spyonweb",
+                category="typosquatting",
+                severity="CRITICAL",
+                title=f"Analytics-ID von verdächtigen Domains missbraucht: {origin}",
+                description=(
+                    f"Die Analytics-ID '{tracking_id}' von {origin} wird in "
+                    f"verdächtig benannten Domains gefunden:\n"
+                    f"{chr(10).join(suspicious[:5])}\n"
+                    f"Dies könnte auf Phishing oder Brand-Abuse hinweisen."
+                ),
+                affected_asset=origin,
+                remediation=(
+                    "Sofortmaßnahme: Tracking-ID rotieren. "
+                    "Abuse-Report an Google. "
+                    "Verdächtige Domains bei Registrar melden."
+                ),
+                raw_data={"suspicious_domains": suspicious},
+            ))
+
+        return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 8: IP-REPUTATION (GreyNoise + AbuseIPDB)
+# Ersatz/Ergänzung zu HoneyDB — MSSP-lizenziert, günstiger, breiter
+#
+# GreyNoise:  Unterscheidet "Mass-Internet-Scanner" von gezielten Angriffen
+# AbuseIPDB:  Community-gemeldete Bad-IPs mit Kategorie + Confidence-Score
+#
+# WARUM NICHT HONEYDB:
+#   HoneyDB Community-Tier = nicht-kommerziell only
+#   Für MSSP-SaaS: OEM-Lizenz erforderlich (Preis auf Anfrage)
+#   GreyNoise + AbuseIPDB haben explizite MSSP/kommerzielle Pläne
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class IPReputationAdapter:
+    """
+    IP-Reputation-Check via GreyNoise + AbuseIPDB.
+
+    GreyNoise API: https://api.greynoise.io/v3/community/{ip}
+    - Community-Plan: 10k Requests/Monat kostenlos
+    - Liefert: classification (malicious/benign/unknown), name, tags
+
+    AbuseIPDB API: https://api.abuseipdb.com/api/v2/check
+    - Free: 1000 req/Tag · Webmaster: $20/Monat · Premium: $50/Monat
+    - Liefert: abuseConfidenceScore, totalReports, categories, lastReportedAt
+    """
+
+    # AbuseIPDB Kategorie-Mapping
+    ABUSE_CATEGORIES = {
+        1: "DNS-Kompromittierung", 2: "DNS-Amplification",
+        3: "DoS-Angriff", 4: "DDoS-Angriff",
+        5: "FTP-Brute-Force", 6: "Ping of Death",
+        7: "Phishing", 8: "Fraud VoIP",
+        9: "Open Proxy", 10: "Web-Spam",
+        11: "E-Mail-Spam", 12: "Blog-Spam",
+        13: "VPN-IP", 14: "Port-Scan",
+        15: "Hacking", 16: "SQL-Injection",
+        17: "Spoofing", 18: "Brute-Force",
+        19: "Bad Web Bot", 20: "Exploited Host",
+        21: "Web App Angriff", 22: "SSH-Brute-Force",
+        23: "IoT-Targeted",
+    }
+
+    def __init__(self, greynoise_key: str = "", abuseipdb_key: str = ""):
+        self.greynoise_key = greynoise_key
+        self.abuseipdb_key = abuseipdb_key
+
+    def check_ips(self, tenant_id: str,
+                  ips: list[str]) -> list[ToolFinding]:
+        """Prüft eine Liste von IPs gegen GreyNoise und AbuseIPDB."""
+        findings = []
+        for ip in ips:
+            if self.greynoise_key:
+                findings.extend(self._greynoise_check(tenant_id, ip))
+            if self.abuseipdb_key:
+                findings.extend(self._abuseipdb_check(tenant_id, ip))
+        return findings
+
+    def _greynoise_check(self, tenant_id: str, ip: str) -> list[ToolFinding]:
+        """GreyNoise Community API — klassifiziert IP als malicious/benign/unknown."""
+        import urllib.request, urllib.error
+        url = f"https://api.greynoise.io/v3/community/{ip}"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"key": self.greynoise_key,
+                         "User-Agent": "EASM-MSSP/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return []  # IP unbekannt bei GreyNoise
+            return []
+        except Exception:
+            return []
+
+        classification = data.get("classification", "unknown")
+        noise = data.get("noise", False)
+        riot = data.get("riot", False)
+        name = data.get("name", "")
+        tags = data.get("tags", [])
+        message = data.get("message", "")
+
+        # RIOT = bekannte legitime Services (Google, Cloudflare etc.) — kein Finding
+        if riot:
+            return []
+
+        # Nur bei malicious oder bekannten Scanner-IPs Finding erzeugen
+        if classification == "malicious":
+            return [ToolFinding(
+                tenant_id=tenant_id,
+                tool="greynoise",
+                category="ip_reputation",
+                severity="HIGH",
+                title=f"GreyNoise: Schadhafte IP aktiv: {ip}",
+                description=(
+                    f"IP {ip} ist laut GreyNoise als 'malicious' klassifiziert.\n"
+                    f"Name: {name or 'unbekannt'}\n"
+                    f"Tags: {', '.join(tags) if tags else 'keine'}\n"
+                    f"Wenn diese IP Verbindungen zu Kunden-Assets aufbaut, "
+                    f"ist von einem gezielten Angriff auszugehen."
+                ),
+                affected_asset=ip,
+                remediation=(
+                    "IP sofort in Firewall blockieren. "
+                    "Logs auf Verbindungen von/zu dieser IP prüfen. "
+                    "Incident-Response einleiten falls Verbindungen gefunden."
+                ),
+                raw_data=data,
+            )]
+        elif noise and not riot:
+            # Mass-Internet-Scanner — weniger kritisch aber relevant
+            return [ToolFinding(
+                tenant_id=tenant_id,
+                tool="greynoise",
+                category="ip_reputation",
+                severity="LOW",
+                title=f"GreyNoise: Internet-Mass-Scanner: {ip}",
+                description=(
+                    f"IP {ip} ist ein bekannter Internet-Mass-Scanner.\n"
+                    f"Name: {name or 'unbekannt'} | Tags: {', '.join(tags[:3]) if tags else '—'}\n"
+                    f"Massenweit aktive Scanner-IPs scannen automatisch alle IPs — "
+                    f"kein gezielter Angriff, aber erhöhte Exponierung."
+                ),
+                affected_asset=ip,
+                remediation="Rate-Limiting und Firewall-Regeln prüfen.",
+                raw_data=data,
+            )]
+        return []
+
+    def _abuseipdb_check(self, tenant_id: str, ip: str) -> list[ToolFinding]:
+        """AbuseIPDB API — Community-gemeldete Missbrauchsmeldungen."""
+        import urllib.request, urllib.error, urllib.parse
+        url = (f"https://api.abuseipdb.com/api/v2/check"
+               f"?ipAddress={ip}&maxAgeInDays=90&verbose")
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Key": self.abuseipdb_key,
+                         "Accept": "application/json",
+                         "User-Agent": "EASM-MSSP/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception:
+            return []
+
+        d = data.get("data", {})
+        score = d.get("abuseConfidenceScore", 0)
+        reports = d.get("totalReports", 0)
+        categories = d.get("categories", [])
+        last_reported = d.get("lastReportedAt", "")
+        isp = d.get("isp", "")
+        country = d.get("countryCode", "")
+        is_tor = d.get("isTor", False)
+        is_public = d.get("isPublic", True)
+
+        if score < 10 and not is_tor:
+            return []  # Unauffällig
+
+        # Severity aus Confidence-Score
+        if score >= 80:
+            severity = "CRITICAL"
+        elif score >= 50:
+            severity = "HIGH"
+        elif score >= 25:
+            severity = "MEDIUM"
+        else:
+            severity = "LOW"
+
+        cat_labels = [
+            self.ABUSE_CATEGORIES.get(c, f"Kategorie {c}")
+            for c in categories[:5]
+        ]
+
+        return [ToolFinding(
+            tenant_id=tenant_id,
+            tool="abuseipdb",
+            category="ip_reputation",
+            severity=severity,
+            title=(
+                f"AbuseIPDB: IP mit Confidence {score}% gemeldet: {ip}"
+                + (" [TOR-Exit-Node]" if is_tor else "")
+            ),
+            description=(
+                f"IP {ip} ({isp}, {country}) wurde mit {score}% Confidence "
+                f"als missbräuchlich gemeldet.\n"
+                f"Meldungen (90 Tage): {reports}\n"
+                f"Kategorien: {', '.join(cat_labels) if cat_labels else '—'}\n"
+                f"Zuletzt gemeldet: {last_reported[:10] if last_reported else '—'}\n"
+                + ("⚠ Tor-Exit-Node: verschleiert Angreifer-Herkunft\n"
+                   if is_tor else "")
+            ),
+            affected_asset=ip,
+            remediation=(
+                "IP sofort in Firewall-Blocklist aufnehmen. "
+                "Logs rückwirkend auf Verbindungen prüfen. "
+                "Bei Score >80: Incident-Response einleiten."
+            ),
+            raw_data=d,
+        )]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADAPTER 9: THREAT INTELLIGENCE (AlienVault OTX + MISP)
+# Alternative zu CISA AIS — weniger bürokratisch, für DE/EU-Kunden relevanter
+#
+# WARUM NICHT CISA AIS DIREKT:
+#   - PKI-Zertifikat von Federal Bridge CA: $500-2000, US-only
+#   - Interconnection Agreement + statische IPs erforderlich
+#   - TAXII 1.1 Legacy-Protokoll, schlechte Python-Unterstützung
+#   - Feed sehr US-lastig, für deutsche KMU-Kunden begrenzt relevant
+#   - Onboarding: 4-8 Wochen
+#
+# STATTDESSEN:
+#   AlienVault OTX: kostenlos, global, STIX/TAXII 2.1, 1 Tag Integration
+#   MISP + BSI-Feed: deutschsprachig, NIS2-relevant, OpenCTI-kompatibel
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ThreatIntelAdapter:
+    """
+    Threat Intelligence via AlienVault OTX und/oder MISP.
+
+    AlienVault OTX:
+    - URL: https://otx.alienvault.com/api/v1/
+    - Kostenlos, API-Key nach Registrierung
+    - Liefert: IOC-Pulses nach Domain/IP/Hash
+
+    MISP:
+    - Self-hosted oder Community-Instanz
+    - BSI-Feed: https://www.bsi.bund.de/MISP
+    - CIRCL (Luxemburg): https://www.circl.lu/services/misp-feeds/
+    - AIS-Daten fließen hier automatisch ein via OpenCTI-Connector
+    """
+
+    OTX_BASE = "https://otx.alienvault.com/api/v1"
+
+    def __init__(self, otx_api_key: str = "", misp_url: str = "",
+                 misp_key: str = ""):
+        self.otx_key = otx_api_key
+        self.misp_url = misp_url.rstrip("/")
+        self.misp_key = misp_key
+
+    def check_domain(self, tenant_id: str,
+                     domain: str) -> list[ToolFinding]:
+        """Prüft eine Domain gegen OTX + MISP auf bekannte IOC-Treffer."""
+        findings = []
+        if self.otx_key:
+            findings.extend(self._otx_domain(tenant_id, domain))
+        if self.misp_url and self.misp_key:
+            findings.extend(self._misp_search(tenant_id, domain, "domain"))
+        return findings
+
+    def check_ip(self, tenant_id: str, ip: str) -> list[ToolFinding]:
+        """Prüft eine IP gegen OTX + MISP."""
+        findings = []
+        if self.otx_key:
+            findings.extend(self._otx_ip(tenant_id, ip))
+        if self.misp_url and self.misp_key:
+            findings.extend(self._misp_search(tenant_id, ip, "ip-src"))
+        return findings
+
+    def check_hash(self, tenant_id: str, hash_: str,
+                   context: str = "") -> list[ToolFinding]:
+        """Prüft einen Datei-Hash gegen OTX (Malware-Check)."""
+        if not self.otx_key:
+            return []
+        return self._otx_hash(tenant_id, hash_, context)
+
+    # ── OTX Implementierungen ──────────────────────────────────────────────────
+
+    def _otx_request(self, path: str) -> dict:
+        import urllib.request
+        url = f"{self.OTX_BASE}{path}"
+        try:
+            req = urllib.request.Request(
+                url, headers={"X-OTX-API-KEY": self.otx_key,
+                               "User-Agent": "EASM-MSSP/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return {}
+
+    def _otx_domain(self, tenant_id: str,
+                    domain: str) -> list[ToolFinding]:
+        """OTX Domain-Lookup: Pulses, Malware-Assoziationen, Geolocation."""
+        data = self._otx_request(f"/indicators/domain/{domain}/general")
+        if not data:
+            return []
+
+        pulse_count = data.get("pulse_info", {}).get("count", 0)
+        pulses = data.get("pulse_info", {}).get("pulses", [])
+        reputation = data.get("reputation", 0)
+        validation = data.get("validation", [])
+
+        if pulse_count == 0 and reputation >= 0:
+            return []  # Keine bekannten Threat-Assoziationen
+
+        # Pulse-Details extrahieren
+        pulse_names = [p.get("name", "")[:60] for p in pulses[:5]]
+        tags = list(set(
+            tag for p in pulses for tag in p.get("tags", [])
+        ))[:10]
+        adversaries = list(set(
+            p.get("adversary", "") for p in pulses
+            if p.get("adversary")
+        ))[:3]
+        malware_families = list(set(
+            m.get("display_name", "")
+            for p in pulses
+            for m in p.get("malware_families", [])
+        ))[:5]
+
+        severity = (
+            "CRITICAL" if (adversaries or malware_families or pulse_count > 10)
+            else "HIGH" if pulse_count > 3
+            else "MEDIUM"
+        )
+
+        return [ToolFinding(
+            tenant_id=tenant_id,
+            tool="alienvault_otx",
+            category="threat_intel",
+            severity=severity,
+            title=(
+                f"OTX: {domain} in {pulse_count} Threat-Intelligence-Pulses"
+            ),
+            description=(
+                f"Domain {domain} erscheint in {pulse_count} OTX-Threat-Pulses.\n"
+                + (f"Bedrohungsakteure: {', '.join(adversaries)}\n"
+                   if adversaries else "")
+                + (f"Malware-Familien: {', '.join(malware_families)}\n"
+                   if malware_families else "")
+                + (f"Tags: {', '.join(tags[:5])}\n" if tags else "")
+                + (f"Pulses: {'; '.join(pulse_names)}"
+                   if pulse_names else "")
+            ),
+            affected_asset=domain,
+            remediation=(
+                "Domain in Threat-Intelligence-Plattform zur Vertiefung analysieren. "
+                "Prüfen ob Kunden-Domain selbst Ziel oder Quelle von Aktivität ist. "
+                "Bei Malware-Assoziation: forensische Untersuchung einleiten."
+            ),
+            raw_data={
+                "pulse_count": pulse_count,
+                "adversaries": adversaries,
+                "malware_families": malware_families,
+                "tags": tags,
+            },
+        )]
+
+    def _otx_ip(self, tenant_id: str, ip: str) -> list[ToolFinding]:
+        """OTX IP-Lookup: Bekannte bösartige IPs."""
+        data = self._otx_request(f"/indicators/IPv4/{ip}/general")
+        if not data:
+            return []
+
+        pulse_count = data.get("pulse_info", {}).get("count", 0)
+        pulses = data.get("pulse_info", {}).get("pulses", [])
+        reputation = data.get("reputation", 0)
+        asn = data.get("asn", "")
+        country = data.get("country_name", "")
+
+        if pulse_count == 0:
+            return []
+
+        adversaries = list(set(
+            p.get("adversary", "") for p in pulses if p.get("adversary")
+        ))
+        severity = ("CRITICAL" if adversaries or pulse_count > 5
+                    else "HIGH" if pulse_count > 2 else "MEDIUM")
+
+        return [ToolFinding(
+            tenant_id=tenant_id,
+            tool="alienvault_otx",
+            category="threat_intel",
+            severity=severity,
+            title=f"OTX: IP {ip} in {pulse_count} Threat-Pulses ({country})",
+            description=(
+                f"IP {ip} ({asn}, {country}) erscheint in {pulse_count} OTX-Threat-Pulses.\n"
+                + (f"Bedrohungsakteure: {', '.join(adversaries)}\n"
+                   if adversaries else "")
+            ),
+            affected_asset=ip,
+            remediation=(
+                "IP in Firewall-Blocklist aufnehmen. "
+                "Ausgehende Verbindungen zu dieser IP sofort prüfen."
+            ),
+            raw_data={"pulse_count": pulse_count, "asn": asn},
+        )]
+
+    def _otx_hash(self, tenant_id: str, hash_: str,
+                  context: str) -> list[ToolFinding]:
+        """OTX Datei-Hash-Lookup: Malware-Erkennung."""
+        # Erkennt MD5, SHA1, SHA256 automatisch
+        hash_type = (
+            "file" if len(hash_) in (32, 40, 64) else "file"
+        )
+        data = self._otx_request(
+            f"/indicators/{hash_type}/{hash_}/general"
+        )
+        if not data:
+            return []
+
+        pulse_count = data.get("pulse_info", {}).get("count", 0)
+        if pulse_count == 0:
+            return []
+
+        malware = data.get("malware_families", [])
+
+        return [ToolFinding(
+            tenant_id=tenant_id,
+            tool="alienvault_otx",
+            category="malware",
+            severity="CRITICAL",
+            title=f"OTX: Bekannte Malware-Hash: {hash_[:16]}...",
+            description=(
+                f"Hash {hash_[:20]}... ist in {pulse_count} OTX-Pulses bekannt.\n"
+                f"Kontext: {context}\n"
+                + (f"Malware: {', '.join(m.get('display_name','') for m in malware[:3])}"
+                   if malware else "")
+            ),
+            affected_asset=context or hash_[:16],
+            remediation=(
+                "Betroffene Datei sofort isolieren und analysieren. "
+                "Endpoint-Scan einleiten. Incident-Response-Prozess starten."
+            ),
+            raw_data={"hash": hash_, "pulse_count": pulse_count},
+        )]
+
+    # ── MISP Implementierung ───────────────────────────────────────────────────
+
+    def _misp_search(self, tenant_id: str, value: str,
+                     attr_type: str) -> list[ToolFinding]:
+        """
+        MISP REST API Suche nach IOC.
+        Erfordert self-hosted MISP oder Community-Zugang (BSI, CIRCL).
+        """
+        import urllib.request
+        if not self.misp_url or not self.misp_key:
+            return []
+
+        url = f"{self.misp_url}/attributes/restSearch"
+        payload = json.dumps({
+            "returnFormat": "json",
+            "type": attr_type,
+            "value": value,
+            "enforceWarninglist": True,
+            "limit": 10,
+        }).encode()
+
+        try:
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={
+                    "Authorization": self.misp_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "EASM-MSSP/1.0",
+                },
+                method="POST"
+            )
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception:
+            return []
+
+        attributes = data.get("response", {}).get("Attribute", [])
+        if not attributes:
+            return []
+
+        # Eindeutige Events zusammenfassen
+        events = {}
+        for attr in attributes:
+            eid = attr.get("event_id", "?")
+            if eid not in events:
+                events[eid] = {
+                    "info": attr.get("Event", {}).get("info", f"Event {eid}"),
+                    "tags": [
+                        t.get("name", "") for t in
+                        attr.get("Event", {}).get("Tag", [])
+                    ],
+                    "date": attr.get("Event", {}).get("date", ""),
+                    "tlp": next(
+                        (t.get("name","") for t in
+                         attr.get("Event",{}).get("Tag",[])
+                         if "tlp" in t.get("name","").lower()),
+                        "TLP:WHITE"
+                    ),
+                }
+
+        severity = "HIGH" if len(events) > 2 else "MEDIUM"
+
+        return [ToolFinding(
+            tenant_id=tenant_id,
+            tool="misp",
+            category="threat_intel",
+            severity=severity,
+            title=f"MISP: '{value}' in {len(events)} Threat-Events",
+            description=(
+                f"Der Indikator '{value}' ({attr_type}) ist in {len(events)} "
+                f"MISP-Threat-Events gelistet:\n"
+                + "\n".join(
+                    f"- {e['info'][:80]} ({e['date']}) [{e['tlp']}]"
+                    for e in list(events.values())[:5]
+                )
+            ),
+            affected_asset=value,
+            remediation=(
+                "MISP-Events für vollständige Kontext-Information prüfen. "
+                "TLP-Level beachten für Weitergabe. "
+                "Defensive Measures aus Events ableiten."
+            ),
+            raw_data={"events": list(events.values()), "attr_count": len(attributes)},
+        )]

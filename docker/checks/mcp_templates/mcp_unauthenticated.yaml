@@ -1,0 +1,35 @@
+id: mcp-unauthenticated-server
+info:
+  name: Unauthenticated MCP Server
+  severity: critical
+  description: MCP server responds to initialize without Bearer token
+  tags: [mcp, auth, rce]
+  reference:
+    - https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-49596
+
+checks:
+  - name: initialize_without_token
+    method: POST
+    path: /mcp
+    body: |
+      {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"easm-scanner","version":"1.0"}}}
+    match:
+      - type: word
+        words: ["result", "protocolVersion", "serverInfo"]
+        condition: and
+    severity: critical
+
+  - name: tools_list
+    method: POST
+    path: /mcp
+    body: |
+      {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+    match:
+      - type: word
+        words: ["tools", "name", "description"]
+        condition: and
+    extract:
+      - name: exposed_tools
+        type: regex
+        regex: '"name"\s*:\s*"([^"]+)"'
+    severity: critical

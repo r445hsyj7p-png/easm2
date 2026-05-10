@@ -1,0 +1,27 @@
+# =============================================================================
+# Dockerfile.theharvester
+# OSINT-Tool: E-Mails, Namen, Subdomains, VHosts
+# Wird vom Worker via: docker run --rm easm-theharvester:latest ...
+# =============================================================================
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    dnsutils \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Neueste Version klonen
+RUN git clone --depth=1 https://github.com/laramies/theHarvester.git .
+
+# Dependencies installieren
+RUN pip install --no-cache-dir -r requirements/base.txt
+
+# DNS-Resolver-Konfiguration für Container-Umgebung
+COPY conf/dns-resolvers.txt /app/theHarvester/discovery/dns/
+
+ENTRYPOINT ["python3", "theHarvester.py"]

@@ -1,0 +1,25 @@
+# =============================================================================
+# Dockerfile.ramparts
+# MCP Security Scanner — analysiert exponierte MCP-Server
+# Wird vom Worker via: docker run --rm easm-ramparts:latest ...
+# =============================================================================
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ramparts + MCP-Client-Library
+RUN pip install --no-cache-dir \
+    ramparts \
+    anthropic \
+    mcp
+
+WORKDIR /app
+
+# Custom MCP-Check-Templates
+COPY checks/mcp_templates/ ./mcp_templates/
+
+ENTRYPOINT ["ramparts"]

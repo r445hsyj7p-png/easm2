@@ -1,0 +1,51 @@
+# =============================================================================
+# docker-compose.dev.yml — Lokale Entwicklung ohne TLS / Domain
+#
+# Verwendung:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Oder mit dem Makefile:
+#   make dev
+#
+# Unterschiede zu Produktion:
+#   - Traefik entfällt — direkter Port-Zugriff
+#   - Kein Let's Encrypt (kein APP_DOMAIN nötig)
+#   - Frontend auf http://localhost:3000
+#   - API auf http://localhost:8000
+#   - Flower auf http://localhost:5555
+#   - Grafana auf http://localhost:3001
+# =============================================================================
+
+services:
+
+  # Traefik deaktivieren
+  traefik:
+    profiles: ["disabled"]
+
+  frontend:
+    ports:
+      - "3000:80"
+    labels: []  # Traefik-Labels entfernen
+
+  api:
+    ports:
+      - "8000:8000"
+    labels: []
+    environment:
+      UVICORN_WORKERS: "1"
+      LOG_LEVEL: "debug"
+
+  flower:
+    ports:
+      - "5555:5555"
+    labels: []
+
+  grafana:
+    ports:
+      - "3001:3000"
+    labels: []
+
+  docs:
+    ports:
+      - "3002:80"
+    labels: []

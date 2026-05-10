@@ -1,0 +1,56 @@
+# =============================================================================
+# Dockerfile.worker — Celery Worker
+# Verwendet projectdiscovery/nuclei als Basis-Image (Docker Hub, kein GitHub nötig)
+# Enthält: nuclei, nmap, Python, alle Dependencies
+# =============================================================================
+
+# Stage 1: Get nuclei + tools from official Docker Hub image
+FROM projectdiscovery/nuclei:v3.3.1 AS nuclei-src
+
+# Stage 2: Runtime
+FROM python:3.11-slim
+
+# System tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    dnsutils \
+    nmap \
+    libpq-dev \
+    gcc \
+    ca-certificates \
+    golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+# Nuclei binary from official image (no GitHub download needed)
+COPY --from=nuclei-src /usr/local/bin/nuclei /usr/local/bin/nuclei
+RUN chmod +x /usr/local/bin/nuclei
+
+# Optional tools via go install (falls durch wenn kein Netz → nmap als Fallback)
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.6.6 \
+    && cp /root/go/bin/subfinder /usr/local/bin/ \
+    || echo "subfinder unavailable - using dns fallback"
+
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.6 \
+    && cp /root/go/bin/httpx /usr/local/bin/ \
+    || echo "httpx unavailable - using curl fallback"
+
+RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.3.1 \
+    && cp /root/go/bin/naabu /usr/local/bin/ \
+    || echo "naabu unavailable - using nmap fallback"
+
+# Python dependencies
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# App code
+COPY . .
+
+# Entrypoint
+COPY scripts/entrypoint-worker.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["celery", "-A", "workers.toolchain_tasks", "worker", \
+     "--loglevel=info", "--concurrency=4"]

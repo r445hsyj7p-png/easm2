@@ -1,0 +1,1075 @@
+---
+# =============================================================================
+# EASM Toolchain Checks — CHK-173 bis CHK-210
+# Erweiterung der bestehenden palo_alto_top172_checks.yaml
+#
+# Kategorien:
+#   easm_discovery  — Subfinder + theHarvester
+#   easm_portscan   — Naabu (SYN-Scan, UDP)
+#   easm_http       — HTTPX (Endpoints, CORS, Screenshots)
+#   easm_vuln       — Nuclei (CVE, Misconfig, Default-Creds)
+#   mcp_exposure    — MCP-Server-Checks (Nuclei + Ramparts)
+# =============================================================================
+
+meta:
+  extension_of: palo_alto_top172_checks.yaml
+  new_checks: 38
+  first_id: CHK-173
+  last_id: CHK-210
+  tools: [subfinder, naabu, theharvester, httpx, nuclei, ramparts]
+
+checks:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # SUBFINDER / THEHARVESTER — Discovery (173-179)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-173
+    title: "Subdomain Takeover möglich (CNAME auf externe Plattform)"
+    category: easm_discovery
+    tool: subfinder
+    severity: CRITICAL
+    automated: true
+    check_type: cname_analysis
+    takeover_targets:
+      - github.io
+      - heroku.com
+      - amazonaws.com
+      - cloudfront.net
+      - shopify.com
+      - zendesk.com
+      - netlify.app
+      - surge.sh
+      - fastly.net
+      - azure-api.net
+    description: >
+      Eine Subdomain hat einen CNAME auf eine externe Plattform die nicht mehr
+      aktiv genutzt wird. Angreifer können die Ressource auf der Plattform
+      beanspruchen und dann Traffic der Subdomain kontrollieren (Cookies, Sessions).
+    remediation: "CNAME entfernen oder Ressource auf Plattform aktiv halten"
+    references:
+      - "https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/10-Test_for_Subdomain_Takeover"
+    cwe: CWE-350
+
+  - id: CHK-174
+    title: "Management-Interface-Subdomain öffentlich erreichbar"
+    category: easm_discovery
+    tool: subfinder
+    severity: HIGH
+    automated: true
+    check_type: subdomain_label_analysis
+    high_risk_labels:
+      [vpn, remote, rdp, admin, portal, owa, exchange, webmail, citrix,
+       globalprotect, phpmyadmin, cpanel, whm, plesk, jenkins, gitlab,
+       grafana, kibana, jira, confluence, dev, staging, test, scada, mcp,
+       api-internal, internal, mgmt, management, backdoor, shell]
+    description: >
+      Eine Subdomain mit dem Namen eines Management-Interfaces ist öffentlich
+      erreichbar. Management-Interfaces sollen nie direkt aus dem Internet
+      zugänglich sein — sie sind primäre Ziele für Angreifer.
+    remediation: "Hinter VPN/Bastion-Host schützen. Direkte Internet-Exposition per Firewall-Regel entfernen."
+    cwe: CWE-284
+
+  - id: CHK-175
+    title: "Unbekannte Subdomains (Shadow-IT) entdeckt"
+    category: easm_discovery
+    tool: subfinder
+    severity: MEDIUM
+    automated: true
+    check_type: inventory_comparison
+    description: >
+      Subfinder hat Subdomains gefunden die nicht im Asset-Inventar des Kunden
+      erfasst sind. Nicht dokumentierte Subdomains sind Shadow-IT: nicht gepflegt,
+      nicht gepatcht, nicht überwacht.
+    remediation: "Asset-Inventar aktualisieren. Unbekannte Subdomains auf Notwendigkeit prüfen."
+    cwe: CWE-1059
+
+  - id: CHK-176
+    title: "Subdomain-Takeover via verwaisten DNS-Record"
+    category: easm_discovery
+    tool: subfinder
+    severity: CRITICAL
+    automated: true
+    check_type: dns_resolution
+    description: >
+      DNS-Record existiert (A/CNAME), aber die Ziel-Ressource antwortet nicht.
+      Verwaiste DNS-Records können von Angreifern übernommen werden.
+    remediation: "Verwaiste DNS-Records sofort entfernen. DNS-Cleanup regelmäßig durchführen."
+    cwe: CWE-350
+
+  - id: CHK-177
+    title: "Mitarbeiter-E-Mails öffentlich bekannt (OSINT)"
+    category: easm_discovery
+    tool: theharvester
+    severity: MEDIUM
+    automated: true
+    check_type: email_harvest
+    sources: [google, bing, duckduckgo, linkedin]
+    description: >
+      theHarvester hat Mitarbeiter-E-Mail-Adressen aus öffentlichen Quellen geerntet.
+      Diese E-Mails sind potenzielle Spear-Phishing-Ziele. Kombiniert mit HIBP-Daten
+      ergibt sich ein vollständiges Credential-Stuffing-Profil.
+    remediation: "E-Mails gegen HIBP prüfen. Security-Awareness-Training. Phishing-Simulation."
+    cwe: CWE-200
+
+  - id: CHK-178
+    title: "LinkedIn-Mitarbeiterprofile öffentlich (Spear-Phishing-Basis)"
+    category: easm_discovery
+    tool: theharvester
+    severity: LOW
+    automated: true
+    check_type: linkedin_harvest
+    description: >
+      Mitarbeiternamen + Jobtitel + E-Mail aus LinkedIn bekannt.
+      Kombination mit HIBP-Credential-Leaks ergibt gezieltes Spear-Phishing-Profil:
+      "Name + Jobtitel + kompromittiertes Passwort + Rolle bekannt".
+    remediation: "LinkedIn-Datenschutz-Einstellungen prüfen. Awareness-Training zu Social Engineering."
+    cwe: CWE-200
+
+  - id: CHK-179
+    title: "Virtual Hosts via OSINT entdeckt (nicht im DNS)"
+    category: easm_discovery
+    tool: theharvester
+    severity: MEDIUM
+    automated: true
+    check_type: vhost_harvest
+    description: >
+      theHarvester hat Virtual Hosts aus Suchmaschinen-Indexierung gefunden die nicht
+      im öffentlichen DNS auftauchen. Könnten veraltete Deployments oder Shadow-IT sein.
+    remediation: "VHosts inventarisieren. Nicht mehr benötigte Deployments dekommissionieren."
+    cwe: CWE-1059
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # NAABU — Port-Scan (180-183)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-180
+    title: "SNMP UDP-Port offen (Community-String 'public'?)"
+    category: easm_portscan
+    tool: naabu
+    severity: HIGH
+    automated: true
+    protocol: UDP
+    port: 161
+    check_type: udp_port_open
+    description: >
+      UDP-Port 161 (SNMP) ist erreichbar. Standard-Community-String 'public'
+      erlaubt vollständiges Netzwerk-Inventar: alle Geräte, Interfaces, Routing-Tables.
+      SNMPv1/v2 überträgt Community-Strings im Klartext.
+    remediation: "SNMPv3 mit Authentifizierung + Verschlüsselung. Community 'public' deaktivieren. Port filtern."
+    cwe: CWE-287
+
+  - id: CHK-181
+    title: "TFTP UDP-Port offen (keine Authentifizierung)"
+    category: easm_portscan
+    tool: naabu
+    severity: HIGH
+    automated: true
+    protocol: UDP
+    port: 69
+    check_type: udp_port_open
+    description: >
+      UDP-Port 69 (TFTP) ist erreichbar. TFTP hat keinerlei Authentifizierung —
+      beliebige Dateien können gelesen und geschrieben werden.
+    remediation: "TFTP deaktivieren. Falls benötigt: auf interne Netze beschränken."
+    cwe: CWE-306
+
+  - id: CHK-182
+    title: "Port offen der typischerweise MCP-Server hostet"
+    category: easm_portscan
+    tool: naabu
+    severity: HIGH
+    automated: true
+    check_type: mcp_port_detection
+    mcp_ports: [3000, 4000, 5000, 6274, 6277, 8000, 8080, 9000]
+    description: >
+      Ein Port der typischerweise für MCP-Server (Model Context Protocol) genutzt wird
+      ist von außen erreichbar. Folgender MCP-Handshake-Check prüft ob tatsächlich
+      ein MCP-Server ohne Auth antwortet (CHK-197).
+    remediation: "MCP-Server-Port hinter Firewall/VPN. MCP-Authentifizierung aktivieren."
+    cwe: CWE-284
+
+  - id: CHK-183
+    title: "UDP DNS-Port offen (Amplification-Angriff möglich)"
+    category: easm_portscan
+    tool: naabu
+    severity: MEDIUM
+    automated: true
+    protocol: UDP
+    port: 53
+    check_type: udp_port_open
+    description: >
+      UDP-Port 53 (DNS) ist von außen erreichbar. Open DNS Resolver können für
+      DDoS-Amplification-Angriffe missbraucht werden (bis 70x Traffic-Verstärkung).
+    remediation: "DNS-Rekursion auf autorisierte Clients beschränken. Rate-Limiting aktivieren."
+    cwe: CWE-400
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # HTTPX — HTTP-Checks (184-196)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-184
+    title: "Spring Boot Actuator exponiert (Kritischster Java-Endpoint)"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - path: /actuator
+        indicator: "_links"
+        severity: HIGH
+      - path: /actuator/env
+        indicator: "propertySources"
+        severity: CRITICAL
+      - path: /actuator/heapdump
+        indicator: "binary_download"
+        severity: CRITICAL
+      - path: /actuator/beans
+        indicator: "beans"
+        severity: HIGH
+      - path: /actuator/mappings
+        indicator: "mappings"
+        severity: HIGH
+    description: >
+      Spring Boot Actuator ist ohne Authentifizierung erreichbar.
+      /actuator/env: ALLE ENV-Variablen sichtbar (DB-Passwörter, API-Keys, Secrets).
+      /actuator/heapdump: Vollständiger JVM-Memory-Dump — enthält alle Laufzeit-Daten.
+      /actuator/beans: Vollständige Spring-Bean-Konfiguration.
+    remediation: >
+      management.endpoints.web.exposure.include=health,info
+      management.endpoint.env.enabled=false
+      Spring Security auf /actuator/** erzwingen.
+    references:
+      - "https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html#actuator.endpoints.security"
+    cwe: CWE-200
+
+  - id: CHK-185
+    title: "Swagger/OpenAPI-Dokumentation in Produktion erreichbar"
+    category: easm_http
+    tool: httpx
+    severity: HIGH
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - /swagger-ui.html
+      - /swagger-ui/index.html
+      - /api-docs
+      - /openapi.json
+      - /openapi.yaml
+      - /swagger.json
+      - /v2/api-docs
+      - /v3/api-docs
+      - /docs
+      - /redoc
+      - /api/docs
+    indicator: "swagger|openapi|FastAPI|Redoc in HTTP 200 response"
+    description: >
+      API-Dokumentation ist öffentlich erreichbar. Angreifer sehen die vollständige
+      Endpoint-Liste mit Parametern, Auth-Anforderungen und Beispiel-Responses.
+      Ermöglicht gezieltes, informiertes API-Fuzzing.
+    remediation: "API-Docs in Produktion deaktivieren oder hinter Authentifizierung schützen."
+    cwe: CWE-200
+
+  - id: CHK-186
+    title: "GraphQL-Endpunkt erreichbar mit aktivierter Introspection"
+    category: easm_http
+    tool: httpx
+    severity: HIGH
+    automated: true
+    check_type: graphql_probe
+    endpoints: [/graphql, /gql, /query, /api/graphql, /graphiql]
+    introspection_query: '{"query":"{__schema{types{name}}}"}'
+    indicator: "data.__schema in HTTP 200 response"
+    description: >
+      GraphQL-Introspection ist aktiv. Angreifer erhalten das vollständige
+      API-Schema: alle Types, Queries, Mutations und ihre Parameter.
+      Ermöglicht Batching-Angriffe und tiefe Query-Injections.
+    remediation: "Introspection in Produktion deaktivieren. Depth-Limiting + Rate-Limiting."
+    cwe: CWE-200
+
+  - id: CHK-187
+    title: ".env-Datei im Webroot erreichbar (Secrets-Leak)"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - /.env
+      - /.env.local
+      - /.env.production
+      - /.env.backup
+      - /.env.old
+      - /.env.example
+    indicator: "APP_KEY= oder DB_PASSWORD= oder API_KEY= in HTTP 200 response"
+    description: >
+      .env-Datei ist öffentlich im Webroot zugänglich. Enthält typischerweise:
+      Datenbankpasswörter, API-Keys, Encryption-Keys, OAuth-Secrets.
+      Direkter vollständiger Credentials-Dump.
+    remediation: ".env nie im Webroot. Nginx/Apache: 'deny all' für .env. .gitignore prüfen."
+    cwe: CWE-312
+
+  - id: CHK-188
+    title: ".git-Verzeichnis öffentlich (Source-Code-Leak)"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - /.git/HEAD
+      - /.git/config
+      - /.git/COMMIT_EDITMSG
+      - /.git/index
+    indicator: "ref: refs/heads/ in HTTP 200 response"
+    description: >
+      .git-Verzeichnis ist öffentlich zugänglich. Mit git-dumper kann der
+      vollständige Quellcode rekonstruiert werden — inklusive aller historischen
+      Commits mit Secrets, Passwörtern und internen Konfigurationen.
+    remediation: "Web-Server .git-Verzeichnis blockieren. git-dumper-Test durchführen."
+    cwe: CWE-312
+
+  - id: CHK-189
+    title: "CORS Origin-Reflection auf API-Endpoint"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: cors_probe
+    method: OPTIONS
+    probe_origin: "https://evil-attacker.de"
+    indicator: "Access-Control-Allow-Origin: https://evil-attacker.de"
+    description: >
+      Der Server spiegelt beliebige Origin-Header zurück (Origin-Reflection).
+      Angreifer können authentifizierte Cross-Site-Requests von jeder Domain senden.
+      Ermöglicht CSRF-Angriffe auf API-Ebene — vollständige Account-Übernahme möglich.
+    remediation: "Erlaubte Origins als Whitelist pflegen. Nie beliebige Origins reflektieren."
+    cwe: CWE-942
+
+  - id: CHK-190
+    title: "CORS Wildcard + Credentials gleichzeitig (Browser-Bypass)"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: cors_header_analysis
+    bad_combination:
+      - "Access-Control-Allow-Origin: *"
+      - "Access-Control-Allow-Credentials: true"
+    description: >
+      CORS mit Wildcard und Credentials gleichzeitig ist eine kritische
+      Fehlkonfiguration. Ermöglicht Cross-Origin-Requests mit Session-Cookies
+      von beliebigen Domains.
+    remediation: "Credentials nur mit expliziten Origins erlauben. Wildcard + Credentials ist immer falsch."
+    cwe: CWE-942
+
+  - id: CHK-191
+    title: "phpinfo.php exponiert (vollständiger Konfigurations-Leak)"
+    category: easm_http
+    tool: httpx
+    severity: HIGH
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints: [/phpinfo.php, /info.php, /test.php, /php_info.php, /phpinfo.html]
+    indicator: "PHP Version + Configuration File in HTTP 200 response"
+    description: >
+      phpinfo()-Ausgabe ist öffentlich zugänglich. Exponiert: PHP-Version,
+      alle Module, Server-Pfade, ENV-Variablen, Konfigurationswerte.
+      Ermöglicht gezieltes Exploit-Selection.
+    remediation: "phpinfo()-Dateien in Produktion entfernen. Debug-Seiten nie deployen."
+    cwe: CWE-200
+
+  - id: CHK-192
+    title: "Laravel Telescope Debug-Interface exponiert"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints: [/telescope, /telescope/requests, /telescope/queries]
+    indicator: "Laravel Telescope in HTTP 200 response"
+    description: >
+      Laravel Telescope ist in Produktion zugänglich. Enthält alle HTTP-Requests
+      (inkl. Passwords in POST-Bodies), SQL-Queries, Exceptions mit Stack-Traces,
+      Jobs, Events — vollständiger Anwendungs-Debug-Dump.
+    remediation: "TELESCOPE_ENABLED=false in .env.production. Telescope nur lokal nutzen."
+    cwe: CWE-200
+
+  - id: CHK-193
+    title: "AWS S3-Bucket öffentlich les- oder schreibbar"
+    category: easm_http
+    tool: httpx
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - "https://{bucket}.s3.amazonaws.com/"
+      - "https://s3.amazonaws.com/{bucket}/"
+    indicator: "HTTP 200 + ListBucketResult XML in response"
+    description: >
+      AWS S3-Bucket ist ohne Authentifizierung les- oder schreibbar.
+      Häufige Ursache für massenhafte Datenlecks. Schreibzugriff ermöglicht
+      Malware-Hosting über legitime Domain.
+    remediation: "S3 Block Public Access aktivieren. Bucket-Policies prüfen. ACLs entfernen."
+    cwe: CWE-284
+
+  - id: CHK-194
+    title: "Admin-Interface ohne Brute-Force-Schutz erreichbar"
+    category: easm_http
+    tool: httpx
+    severity: HIGH
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints: [/admin/, /admin/login, /wp-admin/, /administrator/, /backend/]
+    indicator: "HTTP 200 + Login-Form ohne CAPTCHA/Rate-Limit"
+    description: >
+      Admin-Interface ist ohne Brute-Force-Schutz von außen erreichbar.
+      Kombiniert mit geernteten E-Mails (CHK-177) und geleakten Passwörtern
+      ein vollständiges Credential-Stuffing-Ziel.
+    remediation: "Rate-Limiting, CAPTCHA, MFA, IP-Whitelist oder VPN-Only für Admin-Bereich."
+    cwe: CWE-307
+
+  - id: CHK-195
+    title: "Fehlende Security-Header auf HTTPS-Service"
+    category: easm_http
+    tool: httpx
+    severity: MEDIUM
+    automated: true
+    check_type: response_header_analysis
+    required_headers:
+      - name: Strict-Transport-Security
+        severity: HIGH
+        remediation: "Strict-Transport-Security: max-age=31536000; includeSubDomains"
+      - name: Content-Security-Policy
+        severity: MEDIUM
+        remediation: "CSP-Header konfigurieren: default-src 'self'"
+      - name: X-Frame-Options
+        severity: LOW
+        remediation: "X-Frame-Options: DENY oder SAMEORIGIN"
+      - name: X-Content-Type-Options
+        severity: LOW
+        remediation: "X-Content-Type-Options: nosniff"
+    description: >
+      Sicherheitsrelevante HTTP-Response-Header fehlen. Diese schützen vor
+      MITM-Downgrade (HSTS), XSS (CSP), Clickjacking (X-Frame-Options) und
+      MIME-Sniffing (X-Content-Type-Options).
+    cwe: CWE-693
+
+  - id: CHK-196
+    title: "HTTP statt HTTPS auf produktivem Service (kein HSTS)"
+    category: easm_http
+    tool: httpx
+    severity: HIGH
+    automated: true
+    check_type: tls_probe
+    description: >
+      Produktiver Service ist über unverschlüsseltes HTTP erreichbar oder
+      hat keinen HSTS-Header. Ermöglicht MITM-Angriffe und Credential-Interception.
+    remediation: "TLS erzwingen. HSTS-Header setzen. HTTP → HTTPS Redirect mit 301."
+    cwe: CWE-319
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # NUCLEI — Vulnerability Scans (197-200)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-197
+    title: "Nuclei: Bekannte CVE auf exponiertem Service"
+    category: easm_vuln
+    tool: nuclei
+    severity: CRITICAL
+    automated: true
+    check_type: nuclei_template
+    template_tags: [cve]
+    description: >
+      Ein Nuclei-CVE-Template hat auf dem Ziel-System angeschlagen.
+      Diese Templates haben verifizierte Proof-of-Concept-Exploits.
+      CVSS-Score und CISA-KEV-Status aus dem Template-Metadaten.
+    remediation: "CVE-ID aus Finding für spezifischen Patch. Sofort-Patch für CISA-KEV-Einträge."
+    cwe: CWE-1035
+
+  - id: CHK-198
+    title: "Nuclei: Default-Credentials auf Web-Interface"
+    category: easm_vuln
+    tool: nuclei
+    severity: CRITICAL
+    automated: true
+    check_type: nuclei_template
+    template_tags: [default-login]
+    common_pairs:
+      - [admin, admin]
+      - [admin, password]
+      - [admin, ""]
+      - [guest, guest]
+      - [root, root]
+      - [admin, grafana]
+      - [admin, activemq]
+      - [guest, guest]    # RabbitMQ
+    description: >
+      Nuclei hat Standard-Credentials auf einem Web-Interface gefunden.
+      Default-Credentials sind die häufigste erste Angriffsmethode für
+      bekannte Management-Tools.
+    remediation: "Passwort sofort ändern. Zufälliges starkes Passwort. MFA aktivieren."
+    cwe: CWE-1392
+
+  - id: CHK-199
+    title: "Nuclei: Sensitive Datei/Information exponiert"
+    category: easm_vuln
+    tool: nuclei
+    severity: HIGH
+    automated: true
+    check_type: nuclei_template
+    template_tags: [exposure, file]
+    description: >
+      Nuclei hat sensitive Dateien oder Informationen gefunden:
+      Backup-Dateien (.bak, .old), Config-Dumps, Log-Dateien, DB-Exports.
+    remediation: "Sensitive Dateien aus Webroot entfernen. Web-Server-Konfiguration härten."
+    cwe: CWE-538
+
+  - id: CHK-200
+    title: "Nuclei: Fehlkonfiguration erkannt"
+    category: easm_vuln
+    tool: nuclei
+    severity: MEDIUM
+    automated: true
+    check_type: nuclei_template
+    template_tags: [misconfig]
+    description: >
+      Nuclei hat eine Fehlkonfiguration erkannt: unsichere Defaults,
+      falsche Permissions, fehlende Absicherung von Standard-Endpunkten.
+    remediation: "Spezifische Fehlkonfiguration aus Template-ID adressieren."
+    cwe: CWE-16
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MCP-SERVER-CHECKS (201-210) — Ramparts + Nuclei
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-201
+    title: "MCP-Server ohne Authentifizierung erreichbar"
+    category: mcp_exposure
+    tool: nuclei
+    severity: CRITICAL
+    automated: true
+    check_type: mcp_handshake_probe
+    probe_request:
+      jsonrpc: "2.0"
+      id: 1
+      method: initialize
+      params:
+        protocolVersion: "2024-11-05"
+        capabilities: {}
+        clientInfo:
+          name: easm-scanner
+          version: "1.0"
+    success_indicator: "jsonrpc AND result.serverInfo in response (kein 401/403)"
+    typical_ports: [3000, 8080, 8000, 9000, 4000, 5000]
+    description: >
+      Ein MCP-Server (Model Context Protocol) antwortet auf initialize-Requests
+      ohne Authentifizierung. MCP-Server geben KI-Agenten direkte Kontrolle über:
+      Filesystem (lesen/schreiben), Shell-Kommandos (RCE), Datenbanken, APIs.
+      492 bestätigte offene Instanzen bereits in freier Wildbahn entdeckt.
+
+      Angriff: POST /mcp → initialize → tools/list → tools/call
+      Ergebnis: vollständiger Zugriff auf alle MCP-Tool-Funktionen ohne Auth.
+    remediation: >
+      Bearer-Token oder OAuth 2.1 Authentifizierung aktivieren.
+      MCP-Server nur auf localhost oder VPN-Interfaces binden (nie 0.0.0.0).
+      DANGEROUSLY_OMIT_AUTH=true in Produktion entfernen.
+      Firewall: MCP-Ports nur für autorisierte Clients öffnen.
+    references:
+      - "https://spec.modelcontextprotocol.io/specification/basic/authorization/"
+    cwe: CWE-306
+
+  - id: CHK-202
+    title: "MCP Inspector in Produktion aktiv (CVE-2025-49596)"
+    category: mcp_exposure
+    tool: nuclei
+    severity: CRITICAL
+    automated: true
+    cve_id: CVE-2025-49596
+    cvss_score: 9.4
+    cisa_kev: false
+    check_type: http_endpoint_probe
+    endpoints:
+      - port: 6274
+        path: /
+        indicator: "MCP Inspector in HTTP 200 response body"
+      - port: 6277
+        path: /sse
+        indicator: "text/event-stream Content-Type"
+    description: >
+      MCP Inspector (Debug-Tool) ist auf den Standard-Ports 6274/6277 von außen
+      erreichbar. CVE-2025-49596 (CVSS 9.4): DNS-Rebinding-Angriff möglich.
+      Jede Webseite kann JavaScript ausführen das den Inspector kompromittiert
+      und Tool-Calls in verbundene KI-Agenten injiziert — ohne User-Interaktion.
+
+      MCP Inspector ist ein Entwickler-Tool. Es darf NIEMALS in Produktion
+      oder auf öffentlichen IP-Adressen laufen.
+    remediation: >
+      MCP Inspector sofort stoppen und aus Produktion entfernen.
+      Ports 6274 und 6277 per Firewall-Regel blockieren.
+      ALLOWED_ORIGINS strikt konfigurieren.
+      Nur auf localhost verwenden.
+    cwe: CWE-346
+
+  - id: CHK-203
+    title: "MCP SSE-Endpoint ohne Authentifizierung"
+    category: mcp_exposure
+    tool: ramparts
+    severity: CRITICAL
+    automated: true
+    check_type: mcp_sse_probe
+    endpoints: [/sse, /mcp/sse, /events, /api/sse]
+    indicator: "HTTP 200 + Content-Type: text/event-stream + event: endpoint"
+    description: >
+      MCP SSE-Endpoint (Server-Sent Events Transport) ist ohne Authentifizierung
+      erreichbar. Ermöglicht persistente Verbindung ohne Token.
+      SSE ist der ältere MCP-Transport — viele frühe Implementierungen
+      ignorieren Auth-Anforderungen komplett.
+    remediation: "Bearer-Token auf SSE-Endpoint erzwingen. Auf Streamable HTTP mit OAuth 2.1 upgraden."
+    cwe: CWE-306
+
+  - id: CHK-204
+    title: "MCP-Konfigurationsdatei öffentlich erreichbar (API-Key-Leak)"
+    category: mcp_exposure
+    tool: nuclei
+    severity: CRITICAL
+    automated: true
+    check_type: http_endpoint_probe
+    endpoints:
+      - /mcp.json
+      - /.cursor/mcp.json
+      - /.vscode/mcp.json
+      - /.claude/mcp.json
+      - /claude_desktop_config.json
+      - /.config/claude/claude_desktop_config.json
+    indicator: "HTTP 200 + mcpServers key in JSON response"
+    description: >
+      MCP-Konfigurationsdatei ist öffentlich zugänglich. Enthält:
+      MCP-Server-URLs, API-Keys, Datenbankverbindungen, OAuth-Tokens.
+      Direkter Credentials-Dump der KI-Infrastruktur.
+    remediation: "Konfigurationsdateien aus Webroot entfernen. Web-Server blockiert .json-Configs."
+    cwe: CWE-312
+
+  - id: CHK-205
+    title: "MCP-Server exponiert Shell/Code-Execution-Tools ohne Auth"
+    category: mcp_exposure
+    tool: ramparts
+    severity: CRITICAL
+    automated: true
+    check_type: mcp_tool_analysis
+    dangerous_patterns:
+      - "(execute|exec|run|shell|cmd|command|bash|sh|zsh|fish|powershell)"
+      - "(sudo|privilege|root|admin.*exec)"
+      - "(eval|dynamic.*code|code.*injection)"
+      - "(subprocess|spawn|fork)"
+    description: >
+      Der MCP-Server exponiert Tools die direkte Shell-Ausführung oder
+      Code-Evaluation ermöglichen — ohne Authentifizierung erreichbar.
+      Dies ist ein vollständiger RCE-Vektor: POST /mcp → tools/call → execute_command.
+      Angreifer erhalten vollständige Shell-Kontrolle auf dem Server.
+    remediation: >
+      Shell/Exec-Tools nie über Netzwerk exponieren.
+      MCP-Server mit minimalen OS-Rechten betreiben (non-root, chroot).
+      Mandatory Authentication für jeden Tool-Call.
+      Tool-Input-Sanitisierung + Allowlisting.
+    cwe: CWE-78
+
+  - id: CHK-206
+    title: "MCP-Server exponiert Filesystem-Zugriff ohne Auth"
+    category: mcp_exposure
+    tool: ramparts
+    severity: CRITICAL
+    automated: true
+    check_type: mcp_tool_analysis
+    dangerous_patterns:
+      - "(read|write|create|delete|list|move|copy).*file"
+      - "filesystem|file.*system|fs\\."
+      - "(open|close|stat|chmod|chown).*file"
+      - "directory.*listing|ls|find.*path"
+    description: >
+      Der MCP-Server exponiert Filesystem-Tools ohne Authentifizierung.
+      Angreifer können beliebige Dateien lesen (SSH-Keys, Credentials, Config-Dateien)
+      und schreiben (Backdoors installieren, Logs manipulieren).
+      Path-Traversal-Angriffe betreffen 82% aller MCP-Filesystem-Implementierungen.
+    remediation: >
+      Filesystem-MCP nie ohne Auth. Chroot/Container-Isolation.
+      Nur explizit erlaubte Pfade via Tool-Schema zulassen.
+      Input-Validierung gegen Path-Traversal (../../../etc/passwd).
+    cwe: CWE-22
+
+  - id: CHK-207
+    title: "Prompt-Injection in MCP-Tool-Descriptions"
+    category: mcp_exposure
+    tool: ramparts
+    severity: HIGH
+    automated: true
+    check_type: mcp_tool_description_analysis
+    injection_patterns:
+      - "ignore\\s+(previous|all|above)\\s+instructions"
+      - "do\\s+not\\s+follow\\s+(safety|security|policy|guidelines)"
+      - "you\\s+are\\s+now\\s+in\\s+(dev|test|admin|sudo|god)\\s+mode"
+      - "reveal\\s+(secret|password|credential|token|key|api)"
+      - "(exfiltrate|send.*to.*http|post.*data.*server)"
+      - "<\\!--.*instruction.*-->"
+      - "\\[system\\]|\\[admin\\]|\\[override\\]|\\[jailbreak\\]"
+    description: >
+      Tool-Descriptions des MCP-Servers enthalten potenzielle Prompt-Injection-
+      Anweisungen. Ein kompromittierter MCP-Server kann KI-Agenten manipulieren:
+      Anweisungen in tool.description werden vom LLM wie Systemprompts verarbeitet.
+      Supply-Chain-Angriff: bösartiger npm/pip-MCP-Server mit manipulierten Descriptions.
+    remediation: >
+      Tool-Descriptions auf Injection-Patterns prüfen.
+      Nur vertrauenswürdige MCP-Server installieren.
+      MCP-Server-Supply-Chain-Verifikation (Signaturen).
+      LLM-seitiges Prompt-Injection-Defense aktivieren.
+    cwe: CWE-94
+
+  - id: CHK-208
+    title: "Datenbankverbindungs-String in MCP-Tool-Schema exponiert"
+    category: mcp_exposure
+    tool: ramparts
+    severity: CRITICAL
+    automated: true
+    check_type: mcp_schema_analysis
+    secret_patterns:
+      - "(postgresql|mysql|mongodb|redis|mssql|oracle)://[^\\s\"]+"
+      - "password\\s*[:=]\\s*['\"][^'\"]{6,}"
+      - "(api_key|apikey|api-key)\\s*[:=]\\s*['\"][A-Za-z0-9]{16,}"
+      - "Bearer\\s+[A-Za-z0-9\\-._~+/]+=*"
+    description: >
+      Das Tool-Schema eines MCP-Servers enthält Datenbankverbindungs-Strings
+      oder andere Credentials in den inputSchema-Definitionen.
+      Diese sind für jeden sichtbar der tools/list aufruft.
+    remediation: "Secrets aus Tool-Schemas entfernen. HashiCorp Vault / Secret-Manager nutzen."
+    cwe: CWE-312
+
+  - id: CHK-209
+    title: "MCP-Server läuft als root (Privilege-Escalation-Risiko)"
+    category: mcp_exposure
+    tool: ramparts
+    severity: HIGH
+    automated: true
+    check_type: mcp_process_analysis
+    description: >
+      Der MCP-Server-Prozess läuft mit root-Rechten. Falls der Server kompromittiert
+      wird (z.B. via unauthentifizierter Tool-Call), hat der Angreifer sofort
+      vollständige root-Kontrolle auf dem System.
+    remediation: >
+      MCP-Server als dedizierter non-root User betreiben.
+      Systemd-Service mit User= und Group= Direktiven.
+      Container mit non-root User (USER 1001).
+    cwe: CWE-250
+
+  - id: CHK-210
+    title: "MCP Cross-Domain-Tool-Span (Context-Hijacking möglich)"
+    category: mcp_exposure
+    tool: ramparts
+    severity: HIGH
+    automated: true
+    check_type: mcp_multi_server_analysis
+    description: >
+      Der MCP-Server ruft intern andere MCP-Server auf (Tool-Chaining) ohne
+      den User darüber zu informieren. Ein kompromittierter Server in der Kette
+      kann den vollständigen Context aller anderen Server lesen und manipulieren.
+      Beispiel: Filesystem-MCP → ruft intern DB-MCP auf → liest alle Tabellen.
+    remediation: >
+      MCP-Tool-Chains auflisten und dokumentieren.
+      Jeder Server-zu-Server-Aufruf braucht explizite User-Genehmigung.
+      Least-Privilege: Server-zu-Server nur mit minimalen Rechten.
+    cwe: CWE-441
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # SPYONWEB-CHECKS (211-215)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-211
+    title: "Analytics-ID von verdächtigen Domains missbraucht (Typosquatting)"
+    category: spyonweb
+    tool: spyonweb
+    severity: CRITICAL
+    automated: true
+    check_type: analytics_reverse_lookup
+    description: >
+      SpyOnWeb hat festgestellt, dass die Google Analytics ID der Kunden-Domain
+      auch in verdächtig benannten Domains (phish*, fake*, scam*, clone*) vorkommt.
+      Dies deutet auf Phishing-Kampagnen oder Brand-Abuse hin.
+    remediation: >
+      Tracking-ID sofort rotieren. Google Abuse-Report einreichen.
+      Verdächtige Domains beim Registrar zur Abschaltung melden.
+      Anti-Phishing-Monitoring aktivieren.
+    cwe: CWE-1021
+
+  - id: CHK-212
+    title: "Unbekannte Domains teilen dieselbe Analytics-ID (Shadow-Domains)"
+    category: spyonweb
+    tool: spyonweb
+    severity: MEDIUM
+    automated: true
+    check_type: analytics_reverse_lookup
+    description: >
+      Mehrere Domains außerhalb des bekannten Asset-Inventars verwenden dieselbe
+      Google Analytics ID. Diese Domains sind möglicherweise nicht dokumentiert,
+      nicht gepatcht und nicht überwacht (Shadow-IT).
+    remediation: >
+      Verbundene Domains identifizieren und Asset-Inventar ergänzen.
+      Prüfen ob Domains zur eigenen Organisation gehören.
+      Nicht mehr benötigte Tracking-IDs deaktivieren.
+    cwe: CWE-1059
+
+  - id: CHK-213
+    title: "Shared-Hosting: Fremde Domains auf Kunden-IP (Risikonachbar)"
+    category: spyonweb
+    tool: spyonweb
+    severity: LOW
+    automated: true
+    check_type: ip_reverse_lookup
+    description: >
+      SpyOnWeb zeigt andere Domains auf derselben IP-Adresse wie der Kunde.
+      Eine kompromittierte Nachbar-Domain auf Shared-Hosting kann Angriffe
+      auf geteilte Infrastruktur ermöglichen (Server-seitige Code-Execution,
+      Shared-Session-Storage etc.).
+    remediation: >
+      Kritische Services auf dedizierte IPs (kein Shared-Hosting) umziehen.
+      Nachbar-Domains auf Ruf-Score prüfen (AbuseIPDB, VirusTotal).
+    cwe: CWE-653
+
+  - id: CHK-214
+    title: "AdSense-Publisher-ID in externen Domains gefunden"
+    category: spyonweb
+    tool: spyonweb
+    severity: LOW
+    automated: true
+    check_type: adsense_reverse_lookup
+    description: >
+      Die Google AdSense Publisher-ID des Kunden erscheint auf fremden Domains.
+      Könnte auf Betrug (Ad-Revenue-Hijacking) oder vergessene
+      Test-Deployments hinweisen.
+    remediation: >
+      AdSense-Konto auf autorisierte Domains beschränken (AdSense-Einstellungen).
+      Nicht autorisierte Domains melden.
+    cwe: CWE-200
+
+  - id: CHK-215
+    title: "Domain nicht im SpyOnWeb-Index (möglicherweise neu/versteckt)"
+    category: spyonweb
+    tool: spyonweb
+    severity: INFO
+    automated: true
+    check_type: domain_summary
+    description: >
+      SpyOnWeb hat keine Informationen zur Domain — sie ist entweder sehr neu,
+      hat keine externen Tracking-IDs, oder wurde bewusst nicht indexiert.
+      Kein direktes Risiko, aber es bedeutet eingeschränkte OSINT-Sichtbarkeit.
+    remediation: "Keine Maßnahme erforderlich."
+    cwe: null
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # IP-REPUTATION-CHECKS (216-220)
+  # GreyNoise + AbuseIPDB (MSSP-lizenziert, Ersatz für HoneyDB)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-216
+    title: "GreyNoise: IP als 'malicious' klassifiziert"
+    category: ip_reputation
+    tool: greynoise
+    severity: HIGH
+    automated: true
+    check_type: greynoise_api
+    endpoint: "https://api.greynoise.io/v3/community/{ip}"
+    indicator: "classification: malicious"
+    description: >
+      GreyNoise hat die IP als aktiv schadhafte Quelle klassifiziert —
+      nicht als Mass-Internet-Scanner, sondern als gezielte Bedrohung.
+      Verbindungen von/zu dieser IP sind als Angriff zu werten.
+    remediation: >
+      IP sofort in Firewall-Blocklist aufnehmen.
+      Alle Logs rückwirkend auf Verbindungen prüfen.
+      Incident-Response einleiten falls Verbindungen gefunden.
+    cwe: CWE-778
+
+  - id: CHK-217
+    title: "GreyNoise: Kunden-IP ist Mass-Internet-Scanner"
+    category: ip_reputation
+    tool: greynoise
+    severity: MEDIUM
+    automated: true
+    check_type: greynoise_api
+    indicator: "noise: true, riot: false"
+    description: >
+      Eine Kunden-IP erscheint bei GreyNoise als Mass-Internet-Scanner.
+      Dies bedeutet, dass diese IP aktiv das Internet scannt — entweder
+      ist sie kompromittiert und Teil eines Botnetzes, oder ein legitimer
+      Scan-Service (z.B. Shodan, Censys) nutzt diese IP.
+    remediation: >
+      Prüfen ob die IP tatsächlich für Scan-Aktivitäten konfiguriert ist.
+      Falls unbekannt: Asset möglicherweise kompromittiert → Forensik einleiten.
+      Ausgehende Scan-Aktivität per Firewall einschränken.
+    cwe: CWE-778
+
+  - id: CHK-218
+    title: "AbuseIPDB: IP mit Confidence ≥80% gemeldet (High-Confidence Threat)"
+    category: ip_reputation
+    tool: abuseipdb
+    severity: CRITICAL
+    automated: true
+    check_type: abuseipdb_api
+    endpoint: "https://api.abuseipdb.com/api/v2/check"
+    threshold:
+      abuseConfidenceScore: 80
+    description: >
+      AbuseIPDB meldet diese IP mit ≥80% Confidence als missbräuchlich.
+      Community-Meldungen umfassen: Brute-Force, Port-Scan, DDoS, SQL-Injection.
+      High-Confidence bedeutet viele unabhängige Meldungen in kurzer Zeit.
+    remediation: >
+      IP sofort blockieren. Logs prüfen.
+      Bei Kunden-eigener IP: Asset sofort isolieren und untersuchen.
+    cwe: CWE-778
+
+  - id: CHK-219
+    title: "AbuseIPDB: Kunden-IP als Tor-Exit-Node gemeldet"
+    category: ip_reputation
+    tool: abuseipdb
+    severity: HIGH
+    automated: true
+    check_type: abuseipdb_api
+    indicator: "isTor: true"
+    description: >
+      Eine Kunden-IP ist als Tor-Exit-Node bei AbuseIPDB registriert.
+      Tor-Exit-Nodes werden für anonyme Angriffe genutzt und sind in vielen
+      Threat-Intelligence-Feeds geblockt. Kunden-IP in Tor-Netz = ungewöhnlich.
+    remediation: >
+      Sofort prüfen ob die IP bewusst als Tor-Exit-Node betrieben wird.
+      Falls nicht: Asset kompromittiert → Incident-Response.
+      Tor-Exit-Node-Betrieb aus Unternehmensnetzen ist in der Regel verboten.
+    cwe: CWE-668
+
+  - id: CHK-220
+    title: "AbuseIPDB: IP mit mittlerer Confidence (25-79%) gemeldet"
+    category: ip_reputation
+    tool: abuseipdb
+    severity: MEDIUM
+    automated: true
+    check_type: abuseipdb_api
+    threshold:
+      abuseConfidenceScore_min: 25
+      abuseConfidenceScore_max: 79
+    description: >
+      AbuseIPDB meldet diese IP mit mittlerer Confidence als möglicherweise
+      missbräuchlich. Typische Kategorien: Brute-Force-Versuche,
+      automatisierte Web-Requests, Spam.
+    remediation: >
+      IP auf Watchlist setzen. Logs auf Verbindungen prüfen.
+      Bei eigener Kunden-IP: ausgehende Anfragen analysieren.
+    cwe: CWE-778
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # THREAT-INTEL-CHECKS (221-225)
+  # AlienVault OTX + MISP (statt CISA AIS direkt)
+  # ───────────────────────────────────────────────────────────────────────────
+
+  - id: CHK-221
+    title: "OTX: Domain in aktiven Threat-Intelligence-Pulses"
+    category: threat_intel
+    tool: alienvault_otx
+    severity: HIGH
+    automated: true
+    check_type: otx_api
+    endpoint: "https://otx.alienvault.com/api/v1/indicators/domain/{domain}/general"
+    indicator: "pulse_info.count > 0"
+    description: >
+      Die Kunden-Domain erscheint in AlienVault OTX Threat-Pulses.
+      OTX aggregiert IOCs aus: US-Gov (inkl. CISA AIS-Daten), ISACs,
+      Security-Researcher-Community und kommerziellen Threat-Feeds.
+      Ein Treffer bedeutet die Domain ist Teil einer bekannten Bedrohungskampagne.
+    remediation: >
+      OTX-Pulse für Kontext öffnen. Handelt es sich um die eigene Domain als
+      Ziel (kompromittiert) oder als Angreifer-Infrastruktur?
+      Im ersten Fall: Incident-Response. Im zweiten: Takedown-Request.
+    note_on_cisa_ais: >
+      CISA AIS-Daten sind in OTX-Pulses enthalten — direkter AIS-Anschluss
+      (PKI-Zertifikat, Interconnection Agreement, 4-8 Wochen Onboarding)
+      ist für diesen Use-Case nicht erforderlich.
+    cwe: CWE-778
+
+  - id: CHK-222
+    title: "OTX: IP mit bekanntem Bedrohungsakteur assoziiert"
+    category: threat_intel
+    tool: alienvault_otx
+    severity: CRITICAL
+    automated: true
+    check_type: otx_api
+    indicator: "pulse_info.pulses[].adversary != empty"
+    description: >
+      Eine Kunden-IP ist in OTX-Pulses mit einem namentlich bekannten
+      Bedrohungsakteur (APT-Gruppe, Cyberkriminellen-Gruppe) assoziiert.
+      Dies ist ein starkes Indiz für gezielte Kompromittierung.
+    remediation: >
+      Asset sofort isolieren. Forensische Untersuchung einleiten.
+      Betroffenen IP-Block aus dem Netz nehmen bis Bereinigung abgeschlossen.
+    cwe: CWE-778
+
+  - id: CHK-223
+    title: "OTX: Datei-Hash als Malware bekannt"
+    category: threat_intel
+    tool: alienvault_otx
+    severity: CRITICAL
+    automated: true
+    check_type: otx_hash_api
+    description: >
+      Ein Datei-Hash aus dem Kunden-Asset ist in OTX als bekannte Malware
+      klassifiziert. Die Malware-Familie ist aus dem Pulse-Kontext ableitbar.
+    remediation: >
+      Betroffene Datei sofort isolieren und löschen.
+      Endpoint-Scan auf allen Assets. Ausbreitung prüfen.
+      Incident-Response-Prozess aktivieren.
+    cwe: CWE-506
+
+  - id: CHK-224
+    title: "MISP: IOC in BSI/CIRCL-Threat-Event gefunden"
+    category: threat_intel
+    tool: misp
+    severity: HIGH
+    automated: true
+    check_type: misp_rest_api
+    feeds:
+      - name: "BSI MISP Feed"
+        url: "https://www.bsi.bund.de/MISP"
+        relevance: "DE-spezifische Bedrohungen, NIS2-relevant"
+      - name: "CIRCL MISP"
+        url: "https://www.circl.lu/services/misp-feeds/"
+        relevance: "EU/Benelux-fokussiert"
+      - name: "OpenCTI + CISA AIS Connector"
+        url: "https://hub.filigran.io/cybersecurity-solutions/opencti-integrations/cisa-ais"
+        relevance: "US-Gov IOCs über OpenCTI-Middleware (kein direkter AIS-Anschluss)"
+    description: >
+      Ein Kunden-Indikator (Domain, IP, Hash) erscheint in MISP-Threat-Events.
+      BSI-Feed enthält Deutschland-spezifische IOCs die besonders für
+      NIS2-pflichtige Unternehmen relevant sind. CISA-AIS-Daten fließen
+      über den OpenCTI-Connector automatisch ein — ohne direkten
+      AIS-Anschluss (PKI-Zertifikat + Interconnection Agreement).
+    remediation: >
+      MISP-Event für vollständigen Kontext und TLP-Level prüfen.
+      Defensive Measures aus dem Event ableiten und umsetzen.
+      Bei TLP:AMBER: Weitergabe nur innerhalb der Organisation.
+    cwe: CWE-778
+
+  - id: CHK-225
+    title: "Threat-Intel: Kunden-Domain als C2-Server in IOC-Feed gelistet"
+    category: threat_intel
+    tool: alienvault_otx
+    severity: CRITICAL
+    automated: true
+    check_type: otx_api
+    indicator: "pulse_info.pulses[].tags contains 'c2' or 'command-and-control'"
+    description: >
+      Die Kunden-Domain ist in Threat-Intelligence-Feeds als Command-and-Control
+      (C2) Server einer Malware-Kampagne gelistet. Dies bedeutet entweder:
+      1. Die Domain wurde kompromittiert und wird als C2 missbraucht, oder
+      2. Die Domain wird für Phishing/Malware-Hosting verwendet.
+    remediation: >
+      Domain sofort vom Netz nehmen. Forensische Analyse aller Server.
+      Registrar und Hosting-Provider informieren.
+      Law-Enforcement kontaktieren (bei bestätigter Kompromittierung).
+      Abuse-Report an alle Threat-Intel-Feeds einreichen.
+    cwe: CWE-668
