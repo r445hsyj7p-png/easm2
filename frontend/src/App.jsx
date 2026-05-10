@@ -2,10 +2,12 @@ import { useState, useEffect, useRef, useCallback, createContext, useContext } f
 
 // ─── API CONFIGURATION ────────────────────────────────────────────────────────
 const API_BASE = "/api/v1";
-const TENANT_ID = "t-mueller";
-const getToken   = ()  => localStorage.getItem("easm_token") || "";
-const saveToken  = tok => localStorage.setItem("easm_token", tok);
-const clearToken = ()  => localStorage.removeItem("easm_token");
+const getToken      = ()    => localStorage.getItem("easm_token") || "";
+const saveToken     = tok   => localStorage.setItem("easm_token", tok);
+const clearToken    = ()    => localStorage.removeItem("easm_token");
+const getTenantId   = ()    => localStorage.getItem("easm_tenant_id") || null;
+const saveTenantId  = tid   => localStorage.setItem("easm_tenant_id", tid);
+const clearTenantId = ()    => localStorage.removeItem("easm_tenant_id");
 
 async function apiFetch(path, opts = {}) {
   const token = getToken();
@@ -14,7 +16,7 @@ async function apiFetch(path, opts = {}) {
     headers: { "Content-Type":"application/json", ...(token?{Authorization:`Bearer ${token}`}:{}), ...(opts.headers||{}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) { clearToken(); window.location.reload(); return; }
+  if (res.status === 401) { clearToken(); clearTenantId(); window.location.reload(); return; }
   if (!res.ok) { const e = await res.json().catch(()=>({detail:res.statusText})); throw new Error(e.detail||`HTTP ${res.status}`); }
   return res.json();
 }
@@ -2646,15 +2648,17 @@ function LoginScreen({ onLogin }) {
       const res = await fetch("/api/v1/auth/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, name, tenant_id: "t-mueller" }),
+        body: JSON.stringify({ email, password, name }),
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.detail || "Einrichtung fehlgeschlagen.");
       }
       const { access_token, tenant_id } = await res.json();
+      if (!tenant_id) throw new Error("Login-Antwort enthält keine tenant_id.");
       saveToken(access_token);
-      onLogin(tenant_id || "t-mueller");
+      saveTenantId(tenant_id);
+      onLogin(tenant_id);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2677,8 +2681,10 @@ function LoginScreen({ onLogin }) {
         throw new Error(e.detail || "Login fehlgeschlagen.");
       }
       const { access_token, tenant_id } = await res.json();
+      if (!tenant_id) throw new Error("Login-Antwort enthält keine tenant_id.");
       saveToken(access_token);
-      onLogin(tenant_id || "t-mueller");
+      saveTenantId(tenant_id);
+      onLogin(tenant_id);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -3013,7 +3019,7 @@ function AppShell() {
               Nächster: <span style={{ color: T.accent }}>{nextScanStr}</span>
             </div>
             <Btn onClick={() => triggerScan("full")} variant="primary" size="sm">↺ SCAN NOW</Btn>
-            <button onClick={() => { clearToken(); window.location.reload(); }}
+            <button onClick={() => { clearToken(); clearTenantId(); window.location.reload(); }}
               style={{ background: "transparent", border: `1px solid ${T.border}`,
                 borderRadius: 4, padding: "4px 10px", fontFamily: T.font, fontSize: 9,
                 color: T.text3, cursor: "pointer" }}>Logout</button>
@@ -3100,11 +3106,21 @@ function AppShell() {
 
 // ─── ROOT EXPORT ──────────────────────────────────────────────────────────────
 export default function FullHuntUI() {
-  const [authed, setAuthed]   = useState(!!getToken());
-  const [tenantId, setTenantId] = useState(TENANT_ID);
+  const [authed,   setAuthed]   = useState(!!getToken());
+  const [tenantId, setTenantId] = useState(() => getTenantId());
+
+  // Korrupter State: eingeloggt aber keine tenant_id → ausloggen
+  if (authed && !tenantId) {
+    clearToken();
+    clearTenantId();
+    window.location.reload();
+    return null;
+  }
 
   if (!authed) {
-    return <LoginScreen onLogin={(tid) => { setTenantId(tid); setAuthed(true); }} />;
+    return (
+      <LoginScreen onLogin={(tid) => { setTenantId(tid); setAuthed(true); }} />
+    );
   }
 
   return (
