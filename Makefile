@@ -29,7 +29,6 @@ up: ## Alle Services starten
 	@echo ""
 	@echo "✓ Platform gestartet. Warte ~60s bis alle Services bereit sind."
 	@echo "  Frontend:  https://$$(grep APP_DOMAIN .env | cut -d= -f2)"
-	@echo "  Docs:      https://docs.$$(grep APP_DOMAIN .env | cut -d= -f2)"
 	@echo "  Flower:    https://flower.$$(grep APP_DOMAIN .env | cut -d= -f2)"
 	@echo "  Grafana:   https://grafana.$$(grep APP_DOMAIN .env | cut -d= -f2)"
 
@@ -145,7 +144,7 @@ update: ## Plattform aktualisieren (git pull + rebuild)
 	$(COMPOSE) build --parallel
 	$(COMPOSE) up -d --no-deps api
 	$(COMPOSE) up -d --no-deps worker-scan worker-hibp worker-alerts
-	$(COMPOSE) up -d --no-deps frontend docs
+	$(COMPOSE) up -d --no-deps frontend
 	@echo "✓ Update abgeschlossen"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────

@@ -45,7 +45,3 @@ services:
       - "3001:3000"
     labels: []
 
-  docs:
-    ports:
-      - "3002:80"
-    labels: []

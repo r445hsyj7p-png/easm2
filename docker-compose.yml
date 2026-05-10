@@ -15,7 +15,6 @@
 #   flower          Celery Monitoring Dashboard
 #   prometheus      Metriken-Sammlung
 #   grafana         Metriken-Dashboards
-#   docs            Docusaurus Dokumentation
 # =============================================================================
 
 x-env: &env
@@ -291,20 +290,6 @@ services:
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
     <<: *common
 
-  # ── Docs (Docusaurus) ─────────────────────────────────────────────────────
-  docs:
-    build:
-      context: ./docs
-      dockerfile: ../docker/Dockerfile.docs
-    image: easm-docs:latest
-    container_name: easm-docs
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.docs.rule=Host(`${DOCS_DOMAIN:-docs.${APP_DOMAIN}}`)"
-      - "traefik.http.routers.docs.entrypoints=websecure"
-      - "traefik.http.routers.docs.tls.certresolver=letsencrypt"
-      - "traefik.http.services.docs.loadbalancer.server.port=80"
-    <<: *common
 
 
   # ── Backup (täglich 03:00 UTC) ────────────────────────────────────────────
