@@ -134,8 +134,9 @@ const OverviewDashboard = ({ setTab, tenant, findings, intel, total, setSub }) =
               (findings||[]).filter(f => f.sev === s && f.status === "open").length), 1);
             const sc = SEV[sev];
             return (
-              <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}
-                onClick={() => setTab("findings")} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <div key={sev}
+                onClick={() => setTab("findings")}
+                style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                 <Sev s={sev} small />
                 <div style={{ flex: 1, height: 4, background: T.bg4, borderRadius: 2, overflow: "hidden" }}>
                   <div style={{ width: `${(count/maxCount)*100}%`, height: "100%", background: sc.color, borderRadius: 2 }} />
