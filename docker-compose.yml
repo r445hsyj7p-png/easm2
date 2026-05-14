@@ -260,7 +260,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - ./backups:/backups
+      - backups:/backups
     entrypoint: |
       sh -c 'while true; do
         sleep 86400
@@ -301,3 +301,4 @@ volumes:
     driver: local
   backups:
     driver: local
+    # stored at /var/lib/docker/volumes/easm_backups
