@@ -1,0 +1,43 @@
+# Traefik dynamic routing config — update domain if APP_DOMAIN changes
+http:
+  routers:
+    frontend:
+      rule: "Host(`easm.cycl.group`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: frontend
+
+    api:
+      rule: "Host(`easm.cycl.group`) && PathPrefix(`/api`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: api
+      priority: 10
+
+    flower:
+      rule: "Host(`flower.easm.cycl.group`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: flower
+
+  services:
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:80"
+
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8000"
+
+    flower:
+      loadBalancer:
+        servers:
+          - url: "http://flower:5555"
