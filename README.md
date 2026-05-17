@@ -11,13 +11,14 @@ cp .env.example .env
 make dev
 ```
 
-Browser öffnen: **http://localhost:3000** — beim ersten Aufruf Ersteinrichtung des Admin-Accounts.
+Browser öffnen: **http://localhost:8080** — beim ersten Aufruf Ersteinrichtung des Admin-Accounts.
 
-| Service   | URL                        |
-|-----------|----------------------------|
-| Frontend  | http://localhost:3000      |
-| API Docs  | http://localhost:8000/docs |
-| Flower    | http://localhost:5555      |
+| Service   | URL                         | Zugang              |
+|-----------|-----------------------------|---------------------|
+| Frontend  | http://localhost:8080       | direkt (Nginx :80)  |
+| Frontend  | https://easm.cycl.group     | via Traefik TLS     |
+| API Docs  | http://localhost:8000/docs  | direkt              |
+| Flower    | http://localhost:5555       | direkt              |
 
 ---
 
@@ -199,8 +200,8 @@ Interaktive Dokumentation: `/docs` (Swagger) · `/redoc`
 | Service | Funktion | Port |
 |---------|----------|------|
 | **traefik** | Reverse-Proxy + Let's Encrypt TLS | 80, 443 |
-| **frontend** | React SPA (Vite + Nginx) | via Traefik |
-| **api** | FastAPI (4 Worker, async) | 8000 |
+| **frontend** | React SPA (Vite + Nginx) | **8080** (direkt) · 443 (via Traefik) |
+| **api** | FastAPI (4 Worker, async) | 8000 (intern) |
 | **worker-scan** | Scan-Pipeline (4 Concurrency, 2 GB RAM) | — |
 | **worker-hibp** | HIBP-Checks (rate-limited 10/Min) | — |
 | **worker-alerts** | Reports + Alerts (4 Concurrency) | — |
