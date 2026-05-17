@@ -75,7 +75,6 @@ services:
   # ── Reverse Proxy + TLS ────────────────────────────────────────────────────
   traefik:
     image: traefik:v3.1
-    container_name: easm-traefik
     environment:
       - DOCKER_API_VERSION=1.41
     command:
@@ -107,7 +106,6 @@ services:
       context: ./frontend
       dockerfile: ../docker/Dockerfile.frontend
     image: easm-frontend:latest
-    container_name: easm-frontend
     ports:
       - "8080:80"
     depends_on:
@@ -126,7 +124,6 @@ services:
       context: ./backend
       dockerfile: ../docker/Dockerfile.api
     image: easm-api:latest
-    container_name: easm-api
     environment:
       <<: *env
       UVICORN_WORKERS: "4"
@@ -157,7 +154,6 @@ services:
   # ── Celery Worker: Scan-Pipeline ───────────────────────────────────────────
   worker-scan:
     <<: *worker-base
-    container_name: easm-worker-scan
     command: >
       celery -A workers.toolchain_tasks worker
       --loglevel=info
@@ -177,7 +173,6 @@ services:
   # ── Celery Worker: HIBP Credential-Checks ─────────────────────────────────
   worker-hibp:
     <<: *worker-base
-    container_name: easm-worker-hibp
     command: >
       celery -A workers.toolchain_tasks worker
       --loglevel=info
@@ -188,7 +183,6 @@ services:
   # ── Celery Worker: Alerts + Reports ───────────────────────────────────────
   worker-alerts:
     <<: *worker-base
-    container_name: easm-worker-alerts
     command: >
       celery -A workers.toolchain_tasks worker
       --loglevel=info
@@ -199,7 +193,6 @@ services:
   # ── Celery Beat Scheduler ─────────────────────────────────────────────────
   scheduler:
     <<: *worker-base
-    container_name: easm-scheduler
     command: celery -A workers.toolchain_tasks beat --loglevel=info
     volumes:
       - celery_beat:/app/celerybeat
@@ -207,7 +200,6 @@ services:
   # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: easm-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-easm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
@@ -224,7 +216,6 @@ services:
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: easm-redis
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD:-changeme}
@@ -244,7 +235,6 @@ services:
   # ── Flower (Celery Monitoring) ────────────────────────────────────────────
   flower:
     <<: *worker-base
-    container_name: easm-flower
     command: >
       celery -A workers.toolchain_tasks flower
       --port=5555
@@ -259,7 +249,6 @@ services:
   # ── Backup (täglich 03:00 UTC) ────────────────────────────────────────────
   backup:
     image: postgres:16-alpine
-    container_name: easm-backup
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       PGPASSWORD: ${POSTGRES_PASSWORD}

@@ -241,7 +241,6 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/auth/setup", response_model=LoginResponse, tags=["Auth"])
-@limiter.limit("5/hour")
 async def setup(request: Request, req: SetupRequest, db: AsyncSession = Depends(get_db)):
     """Creates the first admin account. Only callable once."""
     count = await repo.user_count(db)
