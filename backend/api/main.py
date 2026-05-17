@@ -417,7 +417,12 @@ async def create_domain(
         raise HTTPException(status_code=422, detail="Domain darf nicht leer sein.")
     try:
         return await repo.create_domain(db, tenant_id, req.domain, req.ip_ranges, req.panos_version)
+    except ValueError as e:
+        msg = str(e)
+        status = 404 if "Mandant nicht gefunden" in msg else 409
+        raise HTTPException(status_code=status, detail=msg)
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=409, detail=str(e))
 
 

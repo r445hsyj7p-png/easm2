@@ -474,6 +474,11 @@ async def create_domain(
     db: AsyncSession, tenant_id: str, domain: str,
     ip_ranges: list, panos_version: str,
 ) -> dict:
+    # Verify tenant exists first to give a clear error (avoids FK violation 500)
+    t = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+    if not t.first():
+        raise ValueError(f"Mandant nicht gefunden: {tenant_id}")
+
     r = await db.execute(text("""
         INSERT INTO domains (id, tenant_id, domain, fqdn, status, ip_ranges, panos_version, created_at)
         VALUES (gen_random_uuid()::text, :tid, :domain, :domain, 'active', :ranges, :panos, NOW())
@@ -483,10 +488,10 @@ async def create_domain(
         "tid": tenant_id, "domain": domain.strip().lower(),
         "ranges": ip_ranges, "panos": panos_version or "",
     })
-    row = r.mappings().first()  # read BEFORE commit
+    row = r.mappings().first()  # read BEFORE commit — cursor closed after commit
     await db.commit()
     if not row:
-        raise ValueError("Domain already exists")
+        raise ValueError("Domain bereits vorhanden")
     d = dict(row)
     if d.get("created_at"):
         d["added"] = d.pop("created_at").strftime("%Y-%m-%d")
