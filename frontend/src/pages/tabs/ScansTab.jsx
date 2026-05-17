@@ -79,7 +79,7 @@ const SCAN_LOG = [
 const COLORS = { cyan:T.accent, green:T.accent, yellow:T.medium, red:T.critical, purple:T.toolHttpx, orange:T.high, dim:T.text3 };
 
 const ScansTab = () => {
-  const { tenant, triggerScan, scans, reload } = useApp();
+  const { tenant, triggerScan, scans, refresh } = useApp();
   const mappedScans = (scans || []).slice(0, 10).map(s => ({
     label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace("_", " ")} Scan`,
     status: s.status || "pending",
@@ -101,7 +101,7 @@ const ScansTab = () => {
     let p = 0, logI = 0;
     const interval = setInterval(() => {
       p = Math.min(p + 0.9, 100);
-      setPhase(Math.min(Math.floor(p / 20), 4));
+      setPhase(Math.min(Math.floor(p * 6 / 100), 5));
       const threshold = (logI / SCAN_LOG.length) * 100;
       if (p >= threshold && logI < SCAN_LOG.length) {
         setLogs(l => [...l, SCAN_LOG[logI]]);
@@ -111,7 +111,7 @@ const ScansTab = () => {
       if (p >= 100) {
         clearInterval(interval); setRunning(false); setPhase(-1);
         toast.success("Scan abgeschlossen", { description: "Scan abgeschlossen — Ergebnisse laden…" });
-        reload();
+        refresh();
       }
     }, 90);
   };
@@ -159,7 +159,7 @@ const ScansTab = () => {
           {/* Phase cards */}
           <div style={{ display:"flex", gap:6 }}>
             {PHASES.map((ph, i) => {
-              const done = progress >= (i+1)*20;
+              const done = progress >= (i+1)*(100/6);
               const active = running && phase === i;
               return (
                 <div key={i} style={{
