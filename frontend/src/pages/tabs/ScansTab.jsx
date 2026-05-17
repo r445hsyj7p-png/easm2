@@ -37,51 +37,53 @@ const ScanTimeline = ({ scans }) => (
   </div>
 );
 
-const PHASES = [
-  { label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent,       secs:40 },
-  { label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium,       secs:28 },
-  { label:"TLS Scan",     tool:"sslyze — cipher + cert",   color:T.toolSslyze,   secs:22 },
-  { label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx,    secs:34 },
-  { label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical,     secs:67 },
-  { label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,         secs:12 },
+const ALL_PHASES = [
+  { key:"discovery", label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent,       secs:40 },
+  { key:"portscan",  label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium,       secs:28 },
+  { key:"tls",       label:"TLS Scan",     tool:"sslyze — cipher + cert",   color:T.toolSslyze,   secs:22 },
+  { key:"http",      label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx,    secs:34 },
+  { key:"vuln",      label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical,     secs:67 },
+  { key:"mcp",       label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,         secs:12 },
 ];
 
 const SCAN_LOG = [
-  { t:"subfinder",    msg:"loading passive sources: VirusTotal, Shodan, Censys, SecurityTrails, DNSdumpster...", c:"cyan" },
-  { t:"subfinder",    msg:"enumerating subdomains via passive + active DNS...", c:"cyan" },
-  { t:"theharvester", msg:"google: searching emails, virtual hosts | linkedin: profile harvesting...", c:"green" },
-  { t:"theharvester", msg:"OSINT collection complete — harvested emails and LinkedIn profiles", c:"green" },
-  { t:"naabu",        msg:"scanning discovered IPs | top-1000 ports | SYN mode | rate: 2000pps", c:"yellow" },
-  { t:"naabu",        msg:"open ports detected — checking for RDP, admin panels, MCP endpoints...", c:"yellow" },
-  { t:"naabu",        msg:"WARNING: high-risk port combination detected on host", c:"red" },
-  { t:"naabu",        msg:"MCP ports (6274, 6277, 8080) detected on exposed host", c:"red" },
-  { t:"sslyze",       msg:"scanning TLS endpoints | cipher + cert + protocol checks", c:"cyan" },
-  { t:"sslyze",       msg:"TLS 1.0 + TLS 1.1 enabled on remote access endpoint [MEDIUM]", c:"yellow" },
-  { t:"sslyze",       msg:"weak cipher suites (RC4, 3DES) accepted [MEDIUM]", c:"yellow" },
-  { t:"sslyze",       msg:"HSTS missing on admin endpoint [LOW] | certificate expiry imminent [LOW]", c:"yellow" },
-  { t:"httpx",        msg:"probing discovered services | tech-detect | favicon-hash | screenshots enabled", c:"purple" },
-  { t:"httpx",        msg:"CRITICAL: .env file accessible in webroot — credentials exposed", c:"red" },
-  { t:"httpx",        msg:"CRITICAL: Spring Boot Actuator /env endpoint accessible", c:"red" },
-  { t:"httpx",        msg:"tech fingerprint: web framework, web server, runtime environment detected", c:"purple" },
-  { t:"nuclei",       msg:"loading 7,234 templates (api, mcp, cve, misconfig, default-login, exposure)", c:"red" },
-  { t:"nuclei",       msg:"CVE MATCH on VPN endpoint [CRITICAL / KEV]", c:"red" },
-  { t:"nuclei",       msg:"CVE MATCH on exposed MCP port [CRITICAL / CVSS 9.4]", c:"red" },
-  { t:"nuclei",       msg:"spring-boot-actuator-env MATCH on API host [CRITICAL]", c:"red" },
-  { t:"ramparts",     msg:"connecting to discovered MCP endpoint...", c:"orange" },
-  { t:"ramparts",     msg:"MCP initialize response received WITHOUT Bearer token ← CRITICAL", c:"red" },
-  { t:"ramparts",     msg:"tools/list: [execute_command, read_file, write_file, shell, list_directory]", c:"orange" },
-  { t:"ramparts",     msg:"CRITICAL: RCE via tools/call → execute_command — no auth required", c:"red" },
-  { t:"pipeline",     msg:"deduplicating raw findings → unique findings after fingerprint merge", c:"dim" },
-  { t:"pipeline",     msg:"risk scoring: CRITICAL×(-20) + HIGH×(-10) + MEDIUM×(-4) + LOW×(-1)", c:"dim" },
-  { t:"pipeline",     msg:"scan complete ✓ — results saved to database", c:"green" },
+  { t:"subfinder",    msg:"loading passive sources: VirusTotal, Shodan, Censys, SecurityTrails, DNSdumpster...", c:"cyan",   phase:"discovery" },
+  { t:"subfinder",    msg:"enumerating subdomains via passive + active DNS...",                                   c:"cyan",   phase:"discovery" },
+  { t:"theharvester", msg:"google: searching emails, virtual hosts | linkedin: profile harvesting...",            c:"green",  phase:"discovery" },
+  { t:"theharvester", msg:"OSINT collection complete — harvested emails and LinkedIn profiles",                   c:"green",  phase:"discovery" },
+  { t:"naabu",        msg:"scanning discovered IPs | top-1000 ports | SYN mode | rate: 2000pps",                 c:"yellow", phase:"portscan"  },
+  { t:"naabu",        msg:"open ports detected — checking for RDP, admin panels, MCP endpoints...",              c:"yellow", phase:"portscan"  },
+  { t:"naabu",        msg:"WARNING: high-risk port combination detected on host",                                 c:"red",    phase:"portscan"  },
+  { t:"naabu",        msg:"MCP ports (6274, 6277, 8080) detected on exposed host",                               c:"red",    phase:"portscan"  },
+  { t:"sslyze",       msg:"scanning TLS endpoints | cipher + cert + protocol checks",                             c:"cyan",   phase:"tls"       },
+  { t:"sslyze",       msg:"TLS 1.0 + TLS 1.1 enabled on remote access endpoint [MEDIUM]",                        c:"yellow", phase:"tls"       },
+  { t:"sslyze",       msg:"weak cipher suites (RC4, 3DES) accepted [MEDIUM]",                                    c:"yellow", phase:"tls"       },
+  { t:"sslyze",       msg:"HSTS missing on admin endpoint [LOW] | certificate expiry imminent [LOW]",            c:"yellow", phase:"tls"       },
+  { t:"httpx",        msg:"probing discovered services | tech-detect | favicon-hash | screenshots enabled",       c:"purple", phase:"http"      },
+  { t:"httpx",        msg:"CRITICAL: .env file accessible in webroot — credentials exposed",                      c:"red",    phase:"http"      },
+  { t:"httpx",        msg:"CRITICAL: Spring Boot Actuator /env endpoint accessible",                              c:"red",    phase:"http"      },
+  { t:"httpx",        msg:"tech fingerprint: web framework, web server, runtime environment detected",            c:"purple", phase:"http"      },
+  { t:"nuclei",       msg:"loading 7,234 templates (api, mcp, cve, misconfig, default-login, exposure)",         c:"red",    phase:"vuln"      },
+  { t:"nuclei",       msg:"CVE MATCH on VPN endpoint [CRITICAL / KEV]",                                          c:"red",    phase:"vuln"      },
+  { t:"nuclei",       msg:"CVE MATCH on exposed MCP port [CRITICAL / CVSS 9.4]",                                 c:"red",    phase:"vuln"      },
+  { t:"nuclei",       msg:"spring-boot-actuator-env MATCH on API host [CRITICAL]",                               c:"red",    phase:"vuln"      },
+  { t:"ramparts",     msg:"connecting to discovered MCP endpoint...",                                             c:"orange", phase:"mcp"       },
+  { t:"ramparts",     msg:"MCP initialize response received WITHOUT Bearer token ← CRITICAL",                     c:"red",    phase:"mcp"       },
+  { t:"ramparts",     msg:"tools/list: [execute_command, read_file, write_file, shell, list_directory]",          c:"orange", phase:"mcp"       },
+  { t:"ramparts",     msg:"CRITICAL: RCE via tools/call → execute_command — no auth required",                   c:"red",    phase:"mcp"       },
+  { t:"pipeline",     msg:"deduplicating raw findings → unique findings after fingerprint merge",                 c:"dim",    phase:"mcp"       },
+  { t:"pipeline",     msg:"risk scoring: CRITICAL×(-20) + HIGH×(-10) + MEDIUM×(-4) + LOW×(-1)",                  c:"dim",    phase:"mcp"       },
+  { t:"pipeline",     msg:"scan complete ✓ — results saved to database",                                          c:"green",  phase:"mcp"       },
 ];
 
 const COLORS = { cyan:T.accent, green:T.accent, yellow:T.medium, red:T.critical, purple:T.toolHttpx, orange:T.high, dim:T.text3 };
 
+const DEFAULT_SELECTED = { discovery:true, portscan:true, tls:true, http:true, vuln:true, mcp:true };
+
 const ScansTab = () => {
-  const { tenant, triggerScan, scans, refresh } = useApp();
+  const { tenant, triggerScan, scans } = useApp();
   const mappedScans = (scans || []).slice(0, 10).map(s => ({
-    label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace("_", " ")} Scan`,
+    label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace(/_/g, " ")} Scan`,
     status: s.status || "pending",
     time: s.duration_seconds ? `${s.duration_seconds}s` : "—",
     tags: [
@@ -89,33 +91,66 @@ const ScansTab = () => {
       s.risk_score != null ? `score: ${s.risk_score}` : null,
     ].filter(Boolean),
   }));
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState(-1);
-  const [logs, setLogs] = useState([]);
-  const logRef = useRef(null);
 
-  const startScan = () => {
+  const [selected, setSelected] = useState(DEFAULT_SELECTED);
+  const [running,  setRunning]  = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [phase,    setPhase]    = useState(-1);
+  const [logs,     setLogs]     = useState([]);
+  const logRef   = useRef(null);
+  const intervalRef = useRef(null);
+
+  const activePhases = ALL_PHASES.filter(ph => selected[ph.key]);
+  const activeLogs   = SCAN_LOG.filter(l => selected[l.phase]);
+
+  const togglePhase = (key) => {
+    if (running) return;
+    setSelected(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      if (Object.values(next).every(v => !v)) return prev;
+      return next;
+    });
+  };
+
+  const startScan = async () => {
+    if (activePhases.length === 0) return;
     setRunning(true); setProgress(0); setPhase(0); setLogs([]);
+
+    const scanType = activePhases.length === ALL_PHASES.length
+      ? "full"
+      : activePhases.map(p => p.key).join(",");
+
+    try {
+      await triggerScan(scanType);
+    } catch (e) {
+      toast.error("Scan konnte nicht gestartet werden", { description: e.message });
+      setRunning(false);
+      return;
+    }
+
     toast.info("Scan gestartet", { description: "Pipeline läuft — Ergebnisse erscheinen live." });
+
     let p = 0, logI = 0;
-    const interval = setInterval(() => {
-      p = Math.min(p + 0.9, 100);
-      setPhase(Math.min(Math.floor(p * 6 / 100), 5));
-      const threshold = (logI / SCAN_LOG.length) * 100;
-      if (p >= threshold && logI < SCAN_LOG.length) {
-        setLogs(l => [...l, SCAN_LOG[logI]]);
+    const n = activePhases.length;
+    intervalRef.current = setInterval(() => {
+      p = Math.min(p + (0.9 * 6 / Math.max(n, 1)), 100);
+      setPhase(Math.min(Math.floor(p * n / 100), n - 1));
+      const threshold = (logI / activeLogs.length) * 100;
+      if (p >= threshold && logI < activeLogs.length) {
+        setLogs(l => [...l, activeLogs[logI]]);
         logI++;
       }
       setProgress(p);
       if (p >= 100) {
-        clearInterval(interval); setRunning(false); setPhase(-1);
-        toast.success("Scan abgeschlossen", { description: "Scan abgeschlossen — Ergebnisse laden…" });
-        refresh();
+        clearInterval(intervalRef.current);
+        setRunning(false);
+        setPhase(-1);
+        toast.success("Scan gestartet", { description: "Scan läuft im Hintergrund — Ergebnisse erscheinen nach Abschluss." });
       }
     }, 90);
   };
 
+  useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
@@ -123,21 +158,50 @@ const ScansTab = () => {
   return (
     <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", gap:16, alignItems:"flex-start" }}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+
+        {/* Tool selection */}
+        <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:16 }}>
+          <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3,
+            letterSpacing:"0.08em", marginBottom:12 }}>SCAN MODULES — AUSWAHL</div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            {ALL_PHASES.map(ph => {
+              const on = selected[ph.key];
+              return (
+                <button key={ph.key} onClick={() => togglePhase(ph.key)} disabled={running} style={{
+                  display:"flex", alignItems:"center", gap:6,
+                  background: on ? `${ph.color}15` : T.bg3,
+                  border:`1px solid ${on ? ph.color : T.border}`,
+                  borderRadius:4, padding:"6px 12px",
+                  cursor: running ? "not-allowed" : "pointer",
+                  opacity: running ? 0.7 : 1,
+                  transition:"all 0.15s",
+                }}>
+                  <div style={{ width:6, height:6, borderRadius:"50%",
+                    background: on ? ph.color : T.text3, flexShrink:0 }}/>
+                  <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
+                    color: on ? ph.color : T.text3, fontWeight: on ? 700 : 400 }}>{ph.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Scan control */}
         <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:20 }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
             <div>
               <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:14, fontWeight:600, color:T.text0 }}>Scan Pipeline</div>
               <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginTop:3 }}>
-                {tenant?.slug || tenant?.name || "—"} · Full Scan · Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
+                {tenant?.slug || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
               </div>
             </div>
-            <button onClick={startScan} disabled={running} style={{
+            <button onClick={startScan} disabled={running || activePhases.length === 0} style={{
               background: running ? T.bg3 : T.accent,
               border:"none", borderRadius:4, padding:"9px 24px",
               fontFamily:"'JetBrains Mono',monospace", fontSize:11, fontWeight:700,
               color: running ? T.text2 : T.bg0,
-              cursor: running ? "not-allowed" : "pointer", letterSpacing:"0.06em",
+              cursor: (running || activePhases.length === 0) ? "not-allowed" : "pointer",
+              letterSpacing:"0.06em",
               display:"flex", alignItems:"center", gap:7,
             }}>
               {running
@@ -145,38 +209,45 @@ const ScansTab = () => {
                 : <><Play size={13} />START SCAN</>}
             </button>
           </div>
-          {/* Progress */}
+
+          {/* Progress bar */}
           <div style={{ height:3, background:T.bg4, borderRadius:2, overflow:"hidden", marginBottom:8 }}>
             <div style={{ height:"100%", background:T.accent, borderRadius:2,
               width:`${progress}%`, transition:"width 0.15s" }}/>
           </div>
           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:16 }}>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>
-              {running ? PHASES[phase]?.tool : progress >= 100 ? "✓ Scan complete — 35 findings" : "Ready to scan"}
+              {running
+                ? (activePhases[phase]?.tool ?? "")
+                : progress >= 100
+                  ? "✓ Scan gestartet — läuft im Hintergrund"
+                  : `${activePhases.length} von ${ALL_PHASES.length} Modulen ausgewählt`}
             </span>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.accent }}>{Math.round(progress)}%</span>
           </div>
-          {/* Phase cards */}
+
+          {/* Phase cards — only selected phases */}
           <div style={{ display:"flex", gap:6 }}>
-            {PHASES.map((ph, i) => {
-              const done = progress >= (i+1)*(100/6);
+            {activePhases.map((ph, i) => {
+              const done   = progress >= (i + 1) * (100 / activePhases.length);
               const active = running && phase === i;
               return (
-                <div key={i} style={{
+                <div key={ph.key} style={{
                   flex:1, padding:"10px 10px 9px",
                   background: done ? `${ph.color}10` : T.bg3,
                   border:`1px solid ${active ? ph.color : done ? `${ph.color}35` : T.border}`,
-                  borderTop:`2px solid ${active||done ? ph.color : T.border}`,
+                  borderTop:`2px solid ${active || done ? ph.color : T.border}`,
                   borderRadius:4, transition:"all 0.3s",
                 }}>
-                  <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:7, color:ph.color, letterSpacing:"0.08em", marginBottom:4 }}>P{i+1}</div>
+                  <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:7,
+                    color:ph.color, letterSpacing:"0.08em", marginBottom:4 }}>P{i+1}</div>
                   <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:10, fontWeight:600,
-                    color: active||done ? T.text0 : T.text3, marginBottom:2 }}>{ph.label}</div>
+                    color: active || done ? T.text0 : T.text3, marginBottom:2 }}>{ph.label}</div>
                   <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:8, color:T.text3 }}>{ph.tool}</div>
                   <div style={{ marginTop:5, display:"flex", alignItems:"center", gap:4,
                     fontFamily:"'JetBrains Mono',monospace", fontSize:9,
                     color: done ? T.accent : active ? T.accent : T.text3 }}>
-                    {done ? <><CheckCircle size={9} />{ph.secs}s</> :
+                    {done   ? <><CheckCircle size={9} />{ph.secs}s</> :
                      active ? <><Loader2 size={9} style={{ animation:"spin 1s linear infinite" }} />running…</> :
                      `~${ph.secs}s`}
                   </div>
@@ -201,7 +272,7 @@ const ScansTab = () => {
           <div ref={logRef} style={{ padding:"14px 18px", fontFamily:"'JetBrains Mono',monospace",
             fontSize:11, lineHeight:1.9, minHeight:240, maxHeight:340, overflowY:"auto" }}>
             {logs.length === 0 ? (
-              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.slug || "—"} --all-features</span>
+              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.slug || "—"} --modules {activePhases.map(p => p.key).join(",")}</span>
             ) : logs.map((line, i) => (
               <div key={i} style={{ color: COLORS[line.c] || T.text2 }}>
                 <span style={{ color:T.text3, userSelect:"none" }}>[{String(i+1).padStart(2,"0")}] </span>
@@ -223,14 +294,14 @@ const ScansTab = () => {
         </div>
         <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:16 }}>
           <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, letterSpacing:"0.08em", marginBottom:12 }}>TOOL BREAKDOWN — LAST SCAN</div>
-          {Object.entries(tenant?.tool_stats||{}).map(([tool, stats]) => (
+          {Object.entries(tenant?.tool_stats || {}).map(([tool, stats]) => (
             <div key={tool} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, paddingBottom:10, borderBottom:`1px solid ${T.border}` }}>
               <div style={{ width:5, height:5, borderRadius:"50%", background:TOOL_COLOR[tool], flexShrink:0 }}/>
               <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:TOOL_COLOR[tool], fontWeight:700, width:92 }}>{tool}</span>
               <div style={{ flex:1, height:2, background:T.bg4, borderRadius:2 }}>
-                <div style={{ width:`${(stats.findings/12)*100}%`, height:"100%", background:TOOL_COLOR[tool], borderRadius:2 }}/>
+                <div style={{ width:`${(stats.findings / 12) * 100}%`, height:"100%", background:TOOL_COLOR[tool], borderRadius:2 }}/>
               </div>
-              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color: stats.findings>5 ? T.high : T.text2, fontWeight:700, minWidth:18 }}>{stats.findings}F</span>
+              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color: stats.findings > 5 ? T.high : T.text2, fontWeight:700, minWidth:18 }}>{stats.findings}F</span>
               <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>{stats.duration}s</span>
             </div>
           ))}
