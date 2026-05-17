@@ -47,6 +47,22 @@ export function AppProvider({ tenantId, children }) {
     finally { setLoading(false); }
   }, [tenantId]);
 
+  // Silent refresh — does not set loading=true, so UI stays visible
+  const refresh = useCallback(async () => {
+    try {
+      const [t,f,a,m,i,s] = await Promise.all([
+        apiFetch(`/tenants/${tenantId}`),
+        apiFetch(`/tenants/${tenantId}/findings?limit=200`),
+        apiFetch(`/tenants/${tenantId}/assets`),
+        apiFetch(`/tenants/${tenantId}/mcp`),
+        apiFetch(`/tenants/${tenantId}/intel`),
+        apiFetch(`/tenants/${tenantId}/scans?limit=20`),
+      ]);
+      setTenant(t); setFindings(f.findings??f); setAssets(a.assets??a);
+      setMcp(m.servers??m); setIntel(i); setScans(s.scans??s);
+    } catch { /* ignore background refresh errors */ }
+  }, [tenantId]);
+
   useEffect(() => { load(); }, [load]);
 
   const updateFinding = useCallback(async (id, patch) => {
@@ -61,7 +77,7 @@ export function AppProvider({ tenantId, children }) {
   }, [tenantId]);
 
   return (
-    <AppCtx.Provider value={{tenant,findings,assets,mcp,intel,scans,loading,error,reload:load,updateFinding,triggerScan,tenantId}}>
+    <AppCtx.Provider value={{tenant,findings,assets,mcp,intel,scans,loading,error,reload:load,refresh,updateFinding,triggerScan,tenantId}}>
       {children}
     </AppCtx.Provider>
   );
