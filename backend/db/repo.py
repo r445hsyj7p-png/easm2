@@ -423,8 +423,9 @@ async def create_user(
         "email": email, "pw": pw_hash, "name": full_name,
         "role": role, "tid": tenant_id,
     })
+    user_id = r.scalar()  # fetch before commit — cursor closed after commit
     await db.commit()
-    return r.scalar()
+    return user_id
 
 
 async def ensure_default_tenant(db: AsyncSession) -> str:
@@ -439,5 +440,6 @@ async def ensure_default_tenant(db: AsyncSession) -> str:
         VALUES (gen_random_uuid()::text, 'Default', 'default', 'active', NOW())
         RETURNING id
     """))
+    tenant_id = r2.scalar()  # fetch before commit — cursor closed after commit
     await db.commit()
-    return str(r2.scalar())
+    return str(tenant_id)
