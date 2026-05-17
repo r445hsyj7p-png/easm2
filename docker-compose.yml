@@ -123,6 +123,8 @@ services:
     build:
       context: ./backend
       dockerfile: ../docker/Dockerfile.api
+      args:
+        CACHEBUST: "20260517-2"
     image: easm-api:latest
     environment:
       <<: *env

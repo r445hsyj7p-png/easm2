@@ -18,6 +18,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# CACHEBUST invalidates the layer cache on every deploy that bumps the value.
+# Change the default value in docker-compose.yml build args to force rebuild.
+ARG CACHEBUST=1
+RUN echo "Build $CACHEBUST"
+
 # App-Code
 COPY . .
 
