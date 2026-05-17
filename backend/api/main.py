@@ -191,6 +191,10 @@ REST API der EASM MSSP Plattform. Alle Endpunkte erfordern JWT-Authentifizierung
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
 # Middleware-Reihenfolge: LIFO → RequestID ist äußerste Schicht
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
@@ -201,6 +205,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RequestIDMiddleware)
+app.add_exception_handler(Exception, _unhandled_exception_handler)
 
 # ─── Search router ────────────────────────────────────────────────────────────
 try:
