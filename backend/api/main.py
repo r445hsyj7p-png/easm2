@@ -77,13 +77,21 @@ def decode_jwt(token: str) -> dict:
 
 # ─── Password hashing ─────────────────────────────────────────────────────────
 
+import hashlib as _hashlib, base64 as _base64
+
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+def _prepare_pw(password: str) -> str:
+    # bcrypt truncates at 72 bytes — pre-hash with SHA-256 so any length works.
+    # SHA-256 → 32 bytes → base64 → 44 ASCII chars (always < 72 bytes)
+    digest = _hashlib.sha256(password.encode("utf-8")).digest()
+    return _base64.b64encode(digest).decode("ascii")
+
 def hash_pw(password: str) -> str:
-    return _pwd_ctx.hash(password)
+    return _pwd_ctx.hash(_prepare_pw(password))
 
 def verify_pw(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
+    return _pwd_ctx.verify(_prepare_pw(plain), hashed)
 
 # ─── Auth context ─────────────────────────────────────────────────────────────
 
