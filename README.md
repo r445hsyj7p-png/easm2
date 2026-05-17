@@ -7,36 +7,38 @@ External Attack Surface Management für MSSP-Betreiber — produktionsreif, mand
 ```bash
 git clone <repo> easm-platform && cd easm-platform
 cp .env.example .env
-# SECRET_KEY, POSTGRES_PASSWORD, REDIS_PASSWORD in .env setzen
-make dev
+# SECRET_KEY, POSTGRES_PASSWORD, REDIS_PASSWORD, APP_DOMAIN in .env setzen
+docker compose up -d
 ```
 
-Browser öffnen: **http://localhost:8080** — beim ersten Aufruf Ersteinrichtung des Admin-Accounts.
+| Zugang | URL | Beschreibung |
+|--------|-----|--------------|
+| **Frontend (lokal/IP)** | `http://localhost:8080` | Direkt über Nginx, kein DNS nötig |
+| **Frontend (Produktion)** | `https://easm.cycl.group` | Via Traefik + Let's Encrypt TLS |
+| **API Docs (Swagger)** | `http://localhost:8000/docs` | Interaktive API-Dokumentation |
+| **Flower** | `http://localhost:5555` | Celery Task-Monitoring |
 
-| Service   | URL                         | Zugang              |
-|-----------|-----------------------------|---------------------|
-| Frontend  | http://localhost:8080       | direkt (Nginx :80)  |
-| Frontend  | https://easm.cycl.group     | via Traefik TLS     |
-| API Docs  | http://localhost:8000/docs  | direkt              |
-| Flower    | http://localhost:5555       | direkt              |
+Beim ersten Aufruf erscheint die Ersteinrichtung für den Admin-Account.
 
 ---
 
 ## Architektur
 
 ```
-Browser → Nginx (React SPA)
-              ↓ /api/*
-          FastAPI (4 Worker)
-              ↓              ↓              ↓
-        PostgreSQL 16     Redis 7      Celery Workers
-        (RLS, Multi-      (Broker,     ├── worker-scan   (Scan-Pipeline)
-         Tenant)           Cache)      ├── worker-hibp   (Credential-Checks)
-                                       ├── worker-alerts (Benachrichtigungen)
-                                       └── scheduler     (Celery Beat)
+Browser
+  ├── http://<IP>:8080  →  Nginx (React SPA, direkt)
+  └── https://<domain>  →  Traefik  →  Nginx (React SPA)
+                                    ↓ /api/*
+                               FastAPI (4 Worker, async)
+                                    ↓              ↓              ↓
+                              PostgreSQL 16     Redis 7      Celery Workers
+                              (RLS, Multi-      (Broker,     ├── worker-scan
+                               Tenant)           Cache)      ├── worker-hibp
+                                                             ├── worker-alerts
+                                                             └── scheduler (Beat)
 ```
 
-**13 Docker-Services** (Traefik, Frontend, API, 3 Worker-Typen, Beat-Scheduler, PostgreSQL, Redis, Flower, Prometheus, Grafana, Docs, Backup)
+**11 Docker-Services:** Traefik, Frontend, API, 3 Worker-Typen, Beat-Scheduler, PostgreSQL, Redis, Flower, Backup
 
 ---
 
@@ -47,13 +49,26 @@ Browser → Nginx (React SPA)
 | Tab | Inhalt |
 |-----|--------|
 | **Overview** | Executive-Dashboard: Risk-Score, Findings nach Schweregrad, letzte Scans, Asset-Zähler |
-| **Findings** | Alle Security-Findings mit Filter, Suche, Severity-Badge, Status-Workflow (open → acknowledged → fixed) |
-| **Assets** | Subdomain-Inventar, IP-Adressen, Ports, ASN, Hosting-Organisation, Takeover-Flag |
-| **Scans** | Scan-Pipeline starten, Live-Log-Output, Phasen-Fortschritt, Scan-Historie |
+| **Findings** | Alle Security-Findings mit Filter, Suche, Severity-Badge, Toast-Feedback für Ticket/Risk-Accept |
+| **Assets** | Subdomain-Inventar, IP-Adressen, Ports, ASN, Org, Takeover-Flag, Geo-Map, Donut-Chart |
+| **Scans** | Scan-Pipeline starten, Live-Log-Output, Phasen-Fortschritt mit Icons, Scan-Historie |
 | **Reports** | Executive-/Technik-/MCP-/NIS2-Reports, CSV- und JSON-Export |
 | **Intel** | Hosting-Überblick, Geo-Map, Asset-Graph, FQDN-Inventar, Threat-Feeds |
 | **MCP** | MCP-Server-Erkennung, Tool-Inventar, Auth-Status, CVE-Zuordnung |
 | **Admin** | Domains verwalten, Scan-Zeitplan, Benachrichtigungen, Benutzer & RBAC |
+
+### Frontend-Stack
+
+| Paket | Version | Verwendung |
+|-------|---------|------------|
+| `react` | 18.3 | SPA-Framework |
+| `recharts` | 2.12 | DonutChart (Severity-Verteilung), Sparkline (AreaChart) |
+| `react-leaflet` | 4.2 | Geo-Map mit CircleMarker für Asset-Standorte |
+| `leaflet` | 1.9 | Kartenbibliothek (Basis für react-leaflet) |
+| `lucide-react` | 0.395 | Icons (Shield, Play, Loader2, CheckCircle, XCircle, Settings …) |
+| `sonner` | 1.5 | Toast-Benachrichtigungen (Scan-Start/-Ende, Ticket, Speichern) |
+| `axios` | 1.7 | HTTP-Client |
+| `vite` | 5.3 | Build-Tool + Dev-Server |
 
 ### Query-Suche (15 Filter-Felder)
 
@@ -118,33 +133,73 @@ Token werden farbig hervorgehoben. Scope-Erkennung: `port:`, `ip:`, `org:` → A
 
 ---
 
+## Datenbank-Schema
+
+**Migrationen (Alembic)**
+
+| Version | Inhalt |
+|---------|--------|
+| `001_initial` | Basis-Schema: tenants, users, findings, assets, scans |
+| `002_production_schema` | MCP-Server, Intel, Scan-Jobs, RLS-Policies |
+| `003_unique_constraints` | Unique-Constraints auf (tenant_id, fqdn, ip) |
+| `004_technologies` | `technologies JSONB` Spalte auf assets + GIN-Index |
+
+**Technology Inventory** (`004_technologies`)
+
+Jedes Asset speichert erkannte Technologien als JSONB-Array:
+
+```json
+[
+  { "name": "Nginx", "category": "Web Server", "version": "1.24" },
+  { "name": "Laravel", "category": "Framework",  "version": "10.x" }
+]
+```
+
+Aggregation via `list_technologies()` in `repo.py` — gruppiert nach Name/Kategorie/Version, liefert `asset_count`, `max_risk` und betroffene FQDNs.
+
+---
+
 ## Backend-API
 
 **Authentifizierung**
-- `POST /api/v1/auth/setup` — Ersteinrichtung Admin
-- `POST /api/v1/auth/login` — Login → JWT (12h)
-- `GET  /api/v1/auth/status` — Auth-Status
+
+| Method | Endpunkt | Beschreibung |
+|--------|----------|--------------|
+| `GET`  | `/api/v1/auth/status` | Auth-Status prüfen |
+| `POST` | `/api/v1/auth/setup` | Ersteinrichtung Admin-Account |
+| `POST` | `/api/v1/auth/login` | Login → JWT (12h) |
 
 **Mandanten & Assets**
-- `GET  /api/v1/tenants/{id}` — Mandanten-Details
-- `GET  /api/v1/tenants/{id}/assets` — Asset-Inventar (filter: risk, org, port)
-- `GET  /api/v1/tenants/{id}/findings` — Findings (filter: severity, tool, status, cat)
-- `PATCH /api/v1/tenants/{id}/findings/{fid}` — Status / Notizen aktualisieren
+
+| Method | Endpunkt | Beschreibung |
+|--------|----------|--------------|
+| `GET`  | `/api/v1/tenants/{id}` | Mandanten-Details + Score |
+| `GET`  | `/api/v1/tenants/{id}/assets` | Asset-Inventar (filter: risk, org, port) |
+| `GET`  | `/api/v1/tenants/{id}/findings` | Findings (filter: severity, tool, status, cat) |
+| `PATCH`| `/api/v1/tenants/{id}/findings/{fid}` | Status / Notizen aktualisieren |
 
 **Scans**
-- `POST /api/v1/tenants/{id}/scans` — Scan auslösen
-- `GET  /api/v1/tenants/{id}/scans` — Scan-Historie
-- `GET  /api/v1/tenants/{id}/scans/{scan_id}` — Ergebnis-Detail
+
+| Method | Endpunkt | Beschreibung |
+|--------|----------|--------------|
+| `POST` | `/api/v1/tenants/{id}/scans` | Scan auslösen |
+| `GET`  | `/api/v1/tenants/{id}/scans` | Scan-Historie |
+| `GET`  | `/api/v1/tenants/{id}/scans/{scan_id}` | Ergebnis-Detail |
 
 **Intelligence & MCP**
-- `GET  /api/v1/tenants/{id}/intel` — Threat-Intelligence-Aggregation
-- `GET  /api/v1/tenants/{id}/mcp` — MCP-Server-Ergebnisse
 
-**MSSP**
-- `GET  /api/v1/mssp/dashboard` — Mandanten-übergreifende Metriken
+| Method | Endpunkt | Beschreibung |
+|--------|----------|--------------|
+| `GET`  | `/api/v1/tenants/{id}/intel` | Threat-Intelligence-Aggregation |
+| `GET`  | `/api/v1/tenants/{id}/mcp` | MCP-Server-Ergebnisse |
 
-**Suche**
-- `GET  /api/v1/search?q=...&scope=findings&limit=50` — Unified Search
+**MSSP & Suche**
+
+| Method | Endpunkt | Beschreibung |
+|--------|----------|--------------|
+| `GET`  | `/api/v1/mssp/dashboard` | Mandanten-übergreifende Metriken |
+| `GET`  | `/api/v1/search?q=...&scope=all&limit=50` | Unified Search |
+| `GET`  | `/api/v1/health` | Health-Check |
 
 Interaktive Dokumentation: `/docs` (Swagger) · `/redoc`
 
@@ -152,7 +207,7 @@ Interaktive Dokumentation: `/docs` (Swagger) · `/redoc`
 
 ## Celery-Tasks
 
-**Scan-Worker** (`toolchain_tasks.py`)
+**Scan-Worker** (`workers/toolchain_tasks.py`)
 
 | Task | Queue | Beschreibung |
 |------|-------|--------------|
@@ -187,7 +242,6 @@ Interaktive Dokumentation: `/docs` (Swagger) · `/redoc`
 | 06:00 | HIBP-Credential-Check |
 | 06:30 | Threat-Intel IOC-Check |
 | 07:00 | PAN-OS Lizenz-Ablauf-Check |
-| 07:30 | Risk-Acceptance-Ablauf-Check |
 | 08:00 | Monatliche Reports (1. des Monats) |
 | 01:00 | Nuclei Template-Update |
 
@@ -209,22 +263,37 @@ Interaktive Dokumentation: `/docs` (Swagger) · `/redoc`
 | **postgres** | PostgreSQL 16 (RLS) | 5432 (intern) |
 | **redis** | Redis 7 (Broker + Cache, LRU 512 MB) | 6379 (intern) |
 | **flower** | Celery-Monitoring | 5555 |
-| **prometheus** | Metriken (30 Tage Retention) | 9090 (intern) |
-| **grafana** | Dashboards | 3001 |
-| **docs** | Docusaurus Dokumentation | 3002 |
 | **backup** | PostgreSQL-Backup tägl. 03:00 UTC (30 Tage) | — |
+
+### Traefik
+
+- **Version:** v3.1 mit Docker-Provider
+- **TLS:** Let's Encrypt via TLS-Challenge (acme.json in benanntem Volume `certs`)
+- **HTTP→HTTPS Redirect:** automatisch
+- **Docker API:** `DOCKER_API_VERSION=1.41` (Hostinger-Kompatibilität)
+- Domain wird über `APP_DOMAIN` in `.env` gesetzt
+
+### Nginx (Frontend-Container)
+
+- Reverse-Proxy für `/api/` → FastAPI
+- **Lazy DNS Resolution:** `resolver 127.0.0.11 valid=10s` verhindert Crash wenn API beim Start noch nicht erreichbar ist
+- Gzip-Komprimierung für JS/CSS/SVG
+- Security Headers: `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`
+- Statische Assets: `Cache-Control: public, immutable` (1 Jahr)
+- SPA-Fallback: alle Routen → `index.html`
 
 ### Datenbank
 
 - **PostgreSQL 16** mit Row-Level-Security (RLS) — kein Mandant sieht Daten eines anderen
-- **Alembic** für Migrations
-- Automatische tägliche Backups mit 30-Tage-Retention in `./backups/`
+- **Alembic** für Migrationen (4 Versionen, automatisch beim Start)
+- Tägliche Backups via `pg_dump` in benanntem Docker-Volume `backups` (30-Tage-Retention)
 
-### Monitoring
+### Redis
 
-- **Prometheus** scrapet API, Worker und PostgreSQL
-- **Grafana** mit vorbereiteten Dashboards (automatisch provisioniert)
-- **Flower** für Celery-Task-Monitoring in Echtzeit
+- Redis 7 als Celery-Broker + Cache
+- LRU-Eviction bei 512 MB
+- Persistenz via RDB-Snapshots (900/1, 300/10)
+- Passwort-Auth über `REDIS_PASSWORD` Env-Var
 
 ---
 
@@ -287,10 +356,9 @@ make ps             # Service-Status
 
 | Variable | Beschreibung |
 |----------|--------------|
-| `APP_DOMAIN` | Hauptdomain (z.B. `easm.mssp.de`) |
-| `DOCS_DOMAIN` | Docs-Subdomain |
-| `GRAFANA_DOMAIN` | Grafana-Subdomain |
+| `APP_DOMAIN` | Hauptdomain (z.B. `easm.cycl.group`) |
 | `LETSENCRYPT_EMAIL` | E-Mail für Let's Encrypt |
+| `FLOWER_BASIC_AUTH` | Flower-Login (`user:pass`, Standard: `admin:admin`) |
 
 **Scan-Erweiterungen (optional)**
 
@@ -303,7 +371,7 @@ make ps             # Service-Status
 | `VIRUSTOTAL_API_KEY` | VirusTotal (URL/File-Scoring) |
 | `GITHUB_TOKEN` | GitHub (Secret-Scanning) |
 | `ANTHROPIC_API_KEY` | Claude API (LLM-gestützte MCP-Analyse) |
-| `GREYNOISE_API_KEY` | GreyNoise (IP-Reputaton) |
+| `GREYNOISE_API_KEY` | GreyNoise (IP-Reputation) |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB (IP-Abuse-Score) |
 | `ALIENVAULT_OTX_KEY` | AlienVault OTX (Threat-Intel) |
 | `MISP_URL` / `MISP_KEY` | MISP (IOC-Abgleich) |
@@ -326,18 +394,6 @@ make ps             # Service-Status
 
 ---
 
-## Dokumentation
-
-Die integrierte Docusaurus-Dokumentation (http://localhost:3002) umfasst:
-
-- **Getting Started** — Installation, Konfiguration, Erster Scan
-- **Architektur** — Backend, Datenbank, Tools-Übersicht, MCP-Erkennung
-- **API-Referenz** — Alle Endpunkte (Findings, Assets, Scans, Reports, Tenants)
-- **UI-Guides** — Tab-für-Tab-Erklärung inkl. Query-Syntax-Referenz
-- **Operations** — Backups, Monitoring, Skalierung, Troubleshooting, Updates
-
----
-
 ## Architektur-Entscheidungen
 
 - **Kein Demo-Code im API-Pfad** — alle Endpunkte lesen aus PostgreSQL
@@ -348,6 +404,11 @@ Die integrierte Docusaurus-Dokumentation (http://localhost:3002) umfasst:
 - **Celery-Queue-Routing** — jedes Tool hat eine eigene Queue (tls, vuln, mcp, hibp, intel) für unabhängige Skalierung
 - **SSLyze nativ in Python** — kein Binary erforderlich, direkte Integration in Worker
 - **Ramparts + Nuclei kombiniert** — MCP-Erkennung auf Netzwerk- und Protokollebene
+- **Nginx lazy DNS** — `resolver 127.0.0.11` verhindert Startup-Crash bei verzögertem API-Start
+- **Technology Inventory via JSONB** — flexibles Schema, GIN-Index für performante Suche
+- **Benannte Docker-Volumes** — keine Bind-Mounts (Hostinger-Kompatibilität)
+- **Traefik Docker-Provider mit `DOCKER_API_VERSION=1.41`** — Kompatibilität mit Hostinger-Docker-Umgebung
+- **Frontend direkt auf Port 8080** — lokaler Zugriff ohne DNS/TLS, Traefik für Produktion parallel aktiv
 
 ---
 
