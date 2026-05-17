@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { toast } from "sonner";
 import { T } from "../../theme";
 import { Tag, TH, TD } from "../../components/ui/index";
 
@@ -33,7 +34,11 @@ const AdminTab = () => {
   });
 
   const [saved, setSaved] = useState({});
-  const showSaved = (key) => { setSaved(s=>({...s,[key]:true})); setTimeout(()=>setSaved(s=>({...s,[key]:false})),2000); };
+  const showSaved = (key, msg = "Gespeichert") => {
+    setSaved(s=>({...s,[key]:true}));
+    setTimeout(()=>setSaved(s=>({...s,[key]:false})),2000);
+    toast.success(msg);
+  };
 
   const SECTIONS = [
     { id:"domains",      label:"Domains & Targets" },
@@ -60,14 +65,14 @@ const AdminTab = () => {
     }]);
     setNewDomain({ domain:"", ip_ranges:"", panos:"" });
     setAddError(""); setShowAddDomain(false);
-    showSaved("domain_added");
+    showSaved("domain_added", "Domain hinzugefügt — Scan startet beim nächsten Zyklus");
   };
 
   const handleSaveEdit = () => {
     const err = validateDomain(editDomain);
     if (err) { setAddError(err); return; }
     setDomains(d => d.map(x => x.id === editDomain.id ? editDomain : x));
-    setEditDomain(null); setAddError(""); showSaved("domain_saved");
+    setEditDomain(null); setAddError(""); showSaved("domain_saved", "Domain-Änderungen gespeichert");
   };
 
   const statusColor = { active: T.accent, paused: T.medium, pending: T.text2, error: T.red };
@@ -329,7 +334,7 @@ const AdminTab = () => {
                 </div>
               );
             })}
-            <button onClick={() => showSaved("schedule")} style={{ marginTop:8, background:T.accent, border:"none",
+            <button onClick={() => showSaved("schedule", "Scan-Schedule gespeichert")} style={{ marginTop:8, background:T.accent, border:"none",
               borderRadius:4, padding:"8px 24px", fontFamily:T.font, fontSize:11, fontWeight:700,
               color:T.bg0, cursor:"pointer", letterSpacing:"0.05em" }}>
               {saved.schedule ? "✓ SAVED" : "SAVE SCHEDULE"}
@@ -382,7 +387,7 @@ const AdminTab = () => {
                 </label>
               ))}
             </div>
-            <button onClick={()=>showSaved("notif")} style={{ marginTop:8, background:T.accent, border:"none",
+            <button onClick={()=>showSaved("notif", "Notification-Einstellungen gespeichert")} style={{ marginTop:8, background:T.accent, border:"none",
               borderRadius:4, padding:"8px 24px", fontFamily:T.font, fontSize:11, fontWeight:700,
               color:T.bg0, cursor:"pointer", letterSpacing:"0.05em" }}>
               {saved.notif?"✓ SAVED":"SAVE NOTIFICATIONS"}

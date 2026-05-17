@@ -218,27 +218,65 @@ async def list_assets(
 
 
 async def upsert_asset(db: AsyncSession, tenant_id: str, a: dict):
+    import json as _json
     await db.execute(text("""
         INSERT INTO assets
-            (id, tenant_id, fqdn, ip, org, asn, ports, risk, sources, takeover)
+            (id, tenant_id, fqdn, ip, org, asn, ports, risk, sources, takeover, technologies)
         VALUES
             (gen_random_uuid()::text, :tid, :fqdn, :ip::inet, :org, :asn,
-             :ports, :risk, :sources, :takeover)
+             :ports, :risk, :sources, :takeover, :technologies)
         ON CONFLICT (tenant_id, fqdn, ip) DO UPDATE SET
-            org       = EXCLUDED.org,
-            asn       = EXCLUDED.asn,
-            ports     = EXCLUDED.ports,
-            risk      = EXCLUDED.risk,
-            sources   = EXCLUDED.sources,
-            takeover  = EXCLUDED.takeover,
-            last_seen = NOW()
+            org          = EXCLUDED.org,
+            asn          = EXCLUDED.asn,
+            ports        = EXCLUDED.ports,
+            risk         = EXCLUDED.risk,
+            sources      = EXCLUDED.sources,
+            takeover     = EXCLUDED.takeover,
+            technologies = EXCLUDED.technologies,
+            last_seen    = NOW()
     """), {
         "tid": tenant_id, "fqdn": a.get("fqdn"),
         "ip": a.get("ip"), "org": a.get("org"), "asn": a.get("asn"),
         "ports": a.get("ports", []), "risk": a.get("risk", "LOW"),
         "sources": a.get("sources", []), "takeover": bool(a.get("takeover")),
+        "technologies": _json.dumps(a.get("technologies", [])),
     })
     await db.commit()
+
+
+async def list_technologies(db: AsyncSession, tenant_id: str) -> dict:
+    """Aggregiert alle erkannten Technologies über alle Assets eines Mandanten."""
+    r = await db.execute(text("""
+        SELECT
+            tech->>'name'     AS name,
+            tech->>'category' AS category,
+            tech->>'version'  AS version,
+            COUNT(*)::int     AS asset_count,
+            MAX(risk)         AS max_risk,
+            json_agg(DISTINCT fqdn) FILTER (WHERE fqdn IS NOT NULL) AS assets
+        FROM assets,
+             jsonb_array_elements(technologies) AS tech
+        WHERE tenant_id = :tid
+          AND jsonb_array_length(technologies) > 0
+        GROUP BY
+            tech->>'name',
+            tech->>'category',
+            tech->>'version'
+        ORDER BY asset_count DESC, name
+    """), {"tid": tenant_id})
+    rows = [dict(r) for r in r.mappings().all()]
+
+    # Kategorie-Zusammenfassung
+    categories: dict = {}
+    for row in rows:
+        cat = row.get("category") or "Other"
+        categories[cat] = categories.get(cat, 0) + 1
+
+    return {
+        "technologies": rows,
+        "total": len(rows),
+        "categories": categories,
+    }
 
 
 # ─── MCP Servers ─────────────────────────────────────────────────────────────

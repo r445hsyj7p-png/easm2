@@ -13,7 +13,7 @@
 #   - Frontend auf http://localhost:3000
 #   - API auf http://localhost:8000
 #   - Flower auf http://localhost:5555
-#   - Grafana auf http://localhost:3001
+
 # =============================================================================
 
 services:
@@ -40,8 +40,4 @@ services:
       - "5555:5555"
     labels: []
 
-  grafana:
-    ports:
-      - "3001:3000"
-    labels: []
 

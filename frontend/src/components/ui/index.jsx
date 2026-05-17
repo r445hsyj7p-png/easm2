@@ -2,6 +2,17 @@ import { useState, useEffect } from "react";
 import { T, SEV, TOOL_COLOR } from "../../theme";
 import QueryTokenBar from "../QueryTokenBar";
 
+export const Skeleton = ({ width = "100%", height = 16, style = {} }) => (
+  <div style={{
+    width, height,
+    background: `linear-gradient(90deg, ${T.bg3} 0%, ${T.bg4} 50%, ${T.bg3} 100%)`,
+    backgroundSize: "200% 100%",
+    animation: "shimmer 1.4s ease-in-out infinite",
+    borderRadius: 4,
+    ...style,
+  }} />
+);
+
 export const Sev = ({ s, small }) => {
   const c = SEV[s] || SEV.INFO;
   return (

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { toast } from "sonner";
 import { T, SEV, TOOL_COLOR } from "../../theme";
 import { Sev, Tag, TH, TD } from "../../components/ui/index";
 import { useApp } from "../../context/AppContext";
@@ -196,16 +197,18 @@ const FindingsTab = () => {
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button style={{
-                flex: 1, background: T.accent, border: "none", borderRadius: 4,
-                padding: "8px", fontFamily: T.font, fontSize: 10, fontWeight: 700,
-                color: T.bg0, cursor: "pointer", letterSpacing: "0.05em",
-              }}>Open Ticket</button>
-              <button style={{
-                flex: 1, background: "transparent", border: `1px solid ${T.border}`,
-                borderRadius: 4, padding: "8px", fontFamily: T.font, fontSize: 10,
-                color: T.text2, cursor: "pointer",
-              }}>Accept Risk</button>
+              <button onClick={() => toast.success("Ticket erstellt", { description: `${selected.title} — ${selected.asset}` })}
+                style={{
+                  flex: 1, background: T.accent, border: "none", borderRadius: 4,
+                  padding: "8px", fontFamily: T.font, fontSize: 10, fontWeight: 700,
+                  color: T.bg0, cursor: "pointer", letterSpacing: "0.05em",
+                }}>Open Ticket</button>
+              <button onClick={() => toast.info("Risiko akzeptiert", { description: `${selected.title} als akzeptiert markiert.` })}
+                style={{
+                  flex: 1, background: "transparent", border: `1px solid ${T.border}`,
+                  borderRadius: 4, padding: "8px", fontFamily: T.font, fontSize: 10,
+                  color: T.text2, cursor: "pointer",
+                }}>Accept Risk</button>
             </div>
           </div>
         </div>

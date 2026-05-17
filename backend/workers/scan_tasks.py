@@ -14,13 +14,16 @@ from celery import Celery
 from celery.schedules import crontab
 from datetime import datetime, timezone
 import json
+import os
 import time
+
+_redis = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Celery-App konfigurieren
 celery_app = Celery(
     "easm_service",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
+    broker=_redis,
+    backend=_redis.replace("/0", "/1", 1),
 )
 
 celery_app.conf.update(
