@@ -108,6 +108,8 @@ services:
       dockerfile: ../docker/Dockerfile.frontend
     image: easm-frontend:latest
     container_name: easm-frontend
+    ports:
+      - "8080:80"
     depends_on:
       - api
     labels:
