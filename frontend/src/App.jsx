@@ -1,25 +1,20 @@
-import { useState } from "react";
 import { Toaster } from "sonner";
-import { getToken, clearToken, clearTenantId, getTenantId, saveTenantId } from "./api/client";
 import { AppProvider } from "./context/AppContext";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./pages/AppShell";
+import { useAuth } from "./hooks/useAuth";
 
 export default function App() {
-  const [authed,   setAuthed]   = useState(!!getToken());
-  const [tenantId, setTenantId] = useState(() => getTenantId());
+  const { authed, tenantId, handleLogin, handleLogout } = useAuth();
 
+  // Corrupted auth state: token present but no tenant — force a clean slate.
   if (authed && !tenantId) {
-    clearToken();
-    clearTenantId();
-    window.location.reload();
+    handleLogout();
     return null;
   }
 
   if (!authed) {
-    return (
-      <LoginPage onLogin={(tid) => { saveTenantId(tid); setTenantId(tid); setAuthed(true); }} />
-    );
+    return <LoginPage onLogin={handleLogin} />;
   }
 
   return (
