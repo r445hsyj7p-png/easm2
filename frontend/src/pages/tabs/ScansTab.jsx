@@ -78,16 +78,17 @@ const SCAN_LOG = [
 
 const COLORS = { cyan:T.accent, green:T.accent, yellow:T.medium, red:T.critical, purple:T.toolHttpx, orange:T.high, dim:T.text3 };
 
-const histScans = [
-  { label:"2026-05-05 08:03 — Full Scan", status:"completed", time:"202s", tags:["35 findings","score: 48","2 MCP CRITICAL"] },
-  { label:"2026-05-04 08:00 — Full Scan", status:"completed", time:"198s", tags:["31 findings","score: 52"] },
-  { label:"2026-05-03 14:22 — MCP Only",  status:"completed", time:"34s",  tags:["3 findings","1 CRITICAL"] },
-  { label:"2026-05-03 08:00 — Full Scan", status:"completed", time:"207s", tags:["28 findings","score: 55"] },
-  { label:"2026-05-02 08:00 — Full Scan", status:"completed", time:"195s", tags:["26 findings","score: 57"] },
-];
-
 const ScansTab = () => {
-  const { tenant, triggerScan } = useApp();
+  const { tenant, triggerScan, scans, reload } = useApp();
+  const mappedScans = (scans || []).slice(0, 10).map(s => ({
+    label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace("_", " ")} Scan`,
+    status: s.status || "pending",
+    time: s.duration_seconds ? `${s.duration_seconds}s` : "—",
+    tags: [
+      s.findings_count != null ? `${s.findings_count} findings` : null,
+      s.risk_score != null ? `score: ${s.risk_score}` : null,
+    ].filter(Boolean),
+  }));
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [phase, setPhase] = useState(-1);
@@ -109,7 +110,8 @@ const ScansTab = () => {
       setProgress(p);
       if (p >= 100) {
         clearInterval(interval); setRunning(false); setPhase(-1);
-        toast.success("Scan abgeschlossen", { description: "35 Findings · Score: 48 · 202s" });
+        toast.success("Scan abgeschlossen", { description: "Scan abgeschlossen — Ergebnisse laden…" });
+        reload();
       }
     }, 90);
   };
@@ -127,7 +129,7 @@ const ScansTab = () => {
             <div>
               <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:14, fontWeight:600, color:T.text0 }}>Scan Pipeline</div>
               <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginTop:3 }}>
-                mueller-gmbh.de · Full Scan · Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
+                {tenant?.slug || tenant?.name || "—"} · Full Scan · Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
               </div>
             </div>
             <button onClick={startScan} disabled={running} style={{
@@ -199,7 +201,7 @@ const ScansTab = () => {
           <div ref={logRef} style={{ padding:"14px 18px", fontFamily:"'JetBrains Mono',monospace",
             fontSize:11, lineHeight:1.9, minHeight:240, maxHeight:340, overflowY:"auto" }}>
             {logs.length === 0 ? (
-              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain mueller-gmbh.de --all-features</span>
+              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.slug || "—"} --all-features</span>
             ) : logs.map((line, i) => (
               <div key={i} style={{ color: COLORS[line.c] || T.text2 }}>
                 <span style={{ color:T.text3, userSelect:"none" }}>[{String(i+1).padStart(2,"0")}] </span>
@@ -217,7 +219,7 @@ const ScansTab = () => {
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
         <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:20 }}>
           <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:13, fontWeight:600, color:T.text0, marginBottom:14 }}>Scan History</div>
-          <ScanTimeline scans={histScans} />
+          <ScanTimeline scans={mappedScans} />
         </div>
         <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:16 }}>
           <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, letterSpacing:"0.08em", marginBottom:12 }}>TOOL BREAKDOWN — LAST SCAN</div>
