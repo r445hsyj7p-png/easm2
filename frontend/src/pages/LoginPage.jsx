@@ -48,7 +48,10 @@ export default function LoginPage({ onLogin }) {
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
-        throw new Error(e.detail || "Einrichtung fehlgeschlagen.");
+        const msg = e.detail
+          ? (Array.isArray(e.detail) ? e.detail.map(d => d.msg || JSON.stringify(d)).join(", ") : e.detail)
+          : e.error || `Fehler ${res.status}: Einrichtung fehlgeschlagen.`;
+        throw new Error(msg);
       }
       const { access_token, tenant_id } = await res.json();
       if (!tenant_id) throw new Error("Login-Antwort enthält keine tenant_id.");
@@ -74,7 +77,10 @@ export default function LoginPage({ onLogin }) {
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
-        throw new Error(e.detail || "Login fehlgeschlagen.");
+        const msg = e.detail
+          ? (Array.isArray(e.detail) ? e.detail.map(d => d.msg || JSON.stringify(d)).join(", ") : e.detail)
+          : e.error || `Fehler ${res.status}: Login fehlgeschlagen.`;
+        throw new Error(msg);
       }
       const { access_token, tenant_id } = await res.json();
       if (!tenant_id) throw new Error("Login-Antwort enthält keine tenant_id.");
