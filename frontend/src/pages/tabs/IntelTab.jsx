@@ -134,14 +134,7 @@ const IntelTab = () => {
               </div>
             </div>
             <GeoMiniMap
-              assets={(intel?.geo_assets || [
-                {lat:50.11,lng:8.68,  city:"Frankfurt",  risk:"CRITICAL"},
-                {lat:52.52,lng:13.40, city:"Berlin",     risk:"MEDIUM"},
-                {lat:51.23,lng:6.78,  city:"Düsseldorf", risk:"HIGH"},
-                {lat:39.02,lng:-77.54,city:"Ashburn",    risk:"LOW"},
-                {lat:37.34,lng:-121.9,city:"San Jose",   risk:"LOW"},
-                {lat:52.37,lng:4.89,  city:"Amsterdam",  risk:"MEDIUM"},
-              ])}
+              assets={intel?.geo_assets || []}
               height={300}
             />
           </div>
@@ -149,13 +142,9 @@ const IntelTab = () => {
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead><tr><TH>City</TH><TH>Country</TH><TH right>IPs</TH><TH>Risk</TH><TH>Coordinates</TH></tr></thead>
               <tbody>
-                {[{lat:50.11,lng:8.68,city:"Frankfurt",country:"DE",ip_count:10,risk:"CRITICAL"},
-                  {lat:51.23,lng:6.78,city:"Düsseldorf",country:"DE",ip_count:3,risk:"HIGH"},
-                  {lat:52.52,lng:13.40,city:"Berlin",country:"DE",ip_count:4,risk:"MEDIUM"},
-                  {lat:52.37,lng:4.89,city:"Amsterdam",country:"NL",ip_count:3,risk:"MEDIUM"},
-                  {lat:39.02,lng:-77.54,city:"Ashburn, VA",country:"US",ip_count:4,risk:"LOW"},
-                  {lat:37.34,lng:-121.9,city:"San Jose, CA",country:"US",ip_count:2,risk:"LOW"},
-                ].map((a,i)=>(
+                {(intel?.geo_assets||[]).length === 0 ? (
+                  <tr><td colSpan={5} style={{padding:"20px",textAlign:"center",fontFamily:T.font,fontSize:11,color:T.text3}}>Keine Geo-Daten — nach dem ersten Scan verfügbar</td></tr>
+                ) : (intel?.geo_assets||[]).map((a,i)=>(
                   <tr key={i} style={{transition:"background 0.1s"}}
                     onMouseEnter={e=>e.currentTarget.style.background=T.bg3}
                     onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
@@ -163,7 +152,7 @@ const IntelTab = () => {
                     <TD><Tag label={a.country}/></TD>
                     <TD right><span style={{fontFamily:T.font,fontSize:11,fontWeight:700,color:T.text0}}>{a.ip_count}</span></TD>
                     <TD><Sev s={a.risk} small/></TD>
-                    <TD mono muted>{a.lat.toFixed(2)}, {a.lng.toFixed(2)}</TD>
+                    <TD mono muted>{a.lat?.toFixed(2)}, {a.lng?.toFixed(2)}</TD>
                   </tr>
                 ))}
               </tbody>
@@ -249,27 +238,36 @@ const IntelTab = () => {
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
           <div style={{background:T.bg2,border:`1px solid ${T.border}`,borderRadius:6,padding:20,gridColumn:"1/-1"}}>
             <SectionHeader sub="OSINT + HIBP + Stealer-Log correlation">Credential Intelligence</SectionHeader>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
-              {[{label:"Emails Harvested",value:31,color:T.accent,tool:"theHarvester"},
-                {label:"In Breach DBs",value:8,color:T.high,tool:"HIBP"},
-                {label:"Stealer Logs",value:3,color:T.critical,tool:"HIBP Pro"},
-                {label:"LinkedIn Exposed",value:14,color:T.toolHttpx,tool:"theHarvester"},
-              ].map(k=>(
-                <div key={k.label} style={{background:T.bg3,border:`1px solid ${T.border}`,borderRadius:4,padding:"12px 14px"}}>
-                  <div style={{fontFamily:T.font,fontSize:9,color:T.text3,marginBottom:5}}>{k.label}</div>
-                  <div style={{fontFamily:T.font,fontSize:22,fontWeight:700,color:k.color}}>{k.value}</div>
-                  <Pill label={k.tool} color={k.color}/>
+            {!(intel?.credential_intel) ? (
+              <div style={{padding:"20px 0",textAlign:"center",fontFamily:T.font,fontSize:11,color:T.text3}}>Keine Credential-Daten — nach dem ersten HIBP-Check verfügbar</div>
+            ) : (
+              <>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+                  {[
+                    {label:"Emails Harvested", value:intel.credential_intel.emails_found||0,    color:T.accent,    tool:"theHarvester"},
+                    {label:"In Breach DBs",    value:intel.credential_intel.breached_count||0,  color:T.high,      tool:"HIBP"},
+                    {label:"Stealer Logs",     value:intel.credential_intel.stealer_logs||0,    color:T.critical,  tool:"HIBP Pro"},
+                    {label:"LinkedIn Exposed", value:intel.credential_intel.linkedin_count||0,  color:T.toolHttpx, tool:"theHarvester"},
+                  ].map(k=>(
+                    <div key={k.label} style={{background:T.bg3,border:`1px solid ${T.border}`,borderRadius:4,padding:"12px 14px"}}>
+                      <div style={{fontFamily:T.font,fontSize:9,color:T.text3,marginBottom:5}}>{k.label}</div>
+                      <div style={{fontFamily:T.font,fontSize:22,fontWeight:700,color:k.color}}>{k.value}</div>
+                      <Pill label={k.tool} color={k.color}/>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{background:T.bg3,border:`1px solid ${T.border}`,borderRadius:4,padding:"10px 14px"}}>
-              <div style={{fontFamily:T.font,fontSize:9,color:T.text3,marginBottom:8,letterSpacing:"0.06em"}}>SAMPLE HARVESTED EMAILS (anonymized)</div>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                {["k.weber@m***-gmbh.de","m.schmidt@m***-gmbh.de","info@m***-gmbh.de","support@m***-gmbh.de","admin@m***-gmbh.de"].map(e=>(
-                  <Tag key={e} label={e} color={T.accent} bg={`${T.accent}08`} border={`${T.accent}25`}/>
-                ))}
-              </div>
-            </div>
+                {(intel.credential_intel.sample_emails||[]).length > 0 && (
+                  <div style={{background:T.bg3,border:`1px solid ${T.border}`,borderRadius:4,padding:"10px 14px"}}>
+                    <div style={{fontFamily:T.font,fontSize:9,color:T.text3,marginBottom:8,letterSpacing:"0.06em"}}>SAMPLE HARVESTED EMAILS (anonymized)</div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      {(intel.credential_intel.sample_emails||[]).map(e=>(
+                        <Tag key={e} label={e} color={T.accent} bg={`${T.accent}08`} border={`${T.accent}25`}/>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
           <div style={{background:T.bg2,border:`1px solid ${T.border}`,borderRadius:6,padding:20}}>
             <SectionHeader sub="EPSS · CISA KEV · Public Exploits">Exploit Intelligence</SectionHeader>
@@ -290,11 +288,9 @@ const IntelTab = () => {
           </div>
           <div style={{background:T.bg2,border:`1px solid ${T.border}`,borderRadius:6,padding:20}}>
             <SectionHeader sub="Typosquatting · Phishing lookalikes · Mentions">Dark Web &amp; Threat Intel</SectionHeader>
-            {[{type:"Typosquatting",domain:"mueller-gmbh.de.fake-store.ru",date:"2026-04-28",risk:"HIGH"},
-              {type:"Phishing Kit",domain:"muelIer-gmbh.de",date:"2026-04-15",risk:"HIGH"},
-              {type:"Brand Mention",domain:"Telegram channel (ransomware)",date:"2026-03-02",risk:"MEDIUM"},
-              {type:"Credential",domain:"3 accounts on dark web market",date:"2026-02-18",risk:"HIGH"},
-            ].map((row,i)=>(
+            {!(intel?.dark_web) || (intel.dark_web||[]).length === 0 ? (
+              <div style={{padding:"20px 0",textAlign:"center",fontFamily:T.font,fontSize:11,color:T.text3}}>Keine Dark-Web-Daten — nach dem ersten Threat-Intel-Check verfügbar</div>
+            ) : (intel.dark_web||[]).map((row,i)=>(
               <div key={i} style={{display:"flex",gap:10,alignItems:"center",marginBottom:10,paddingBottom:10,borderBottom:`1px solid ${T.border}`}}>
                 <Sev s={row.risk} small/>
                 <div style={{flex:1}}>

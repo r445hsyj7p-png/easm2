@@ -153,40 +153,57 @@ celery_app.conf.update(
 logger = get_task_logger(__name__)
 
 
-# ─── Demo-Tenant-Datenbank ────────────────────────────────────────────────────
-# In Produktion: echte DB-Abfrage via SQLAlchemy
-DEMO_TENANTS = [
-    {
-        "id": "t-stadtwerke", "name": "Stadtwerke Herford AöR",
-        "domain": "stadtwerke-herford.de",
-        "ip_ranges": ["192.0.2.0/24"],
-        "panos_version": "10.1.11",
-        "api_keys": {},
-    },
-    {
-        "id": "t-mueller", "name": "Müller GmbH",
-        "domain": "mueller-gmbh.de",
-        "ip_ranges": ["203.0.113.0/24"],
-        "panos_version": "10.2.7",
-        "api_keys": {},
-    },
-    {
-        "id": "t-technova", "name": "TechNova AG",
-        "domain": "technova-ag.de",
-        "ip_ranges": ["198.51.100.0/24"],
-        "panos_version": "11.1.3",
-        "api_keys": {},
-    },
-]
-
+# ─── Tenant-Abfrage aus der Datenbank ────────────────────────────────────────
 
 def get_all_tenants() -> list:
-    return DEMO_TENANTS
+    """Lädt alle aktiven Mandanten mit ihren Domains aus der Datenbank."""
+    import psycopg2
+    import psycopg2.extras
+
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        logger.error("DATABASE_URL nicht gesetzt — keine Mandanten geladen")
+        return []
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    t.id,
+                    t.name,
+                    COALESCE(MIN(d.domain), t.slug) AS domain,
+                    COALESCE(
+                        array_agg(DISTINCT r) FILTER (WHERE r IS NOT NULL),
+                        '{}'
+                    ) AS ip_ranges,
+                    COALESCE(MAX(d.panos_version), '') AS panos_version
+                FROM tenants t
+                LEFT JOIN domains d ON d.tenant_id = t.id AND d.status = 'active'
+                LEFT JOIN LATERAL unnest(d.ip_ranges) AS r ON TRUE
+                WHERE t.status = 'active'
+                GROUP BY t.id, t.name, t.slug
+                ORDER BY t.name
+            """)
+            rows = cur.fetchall()
+        conn.close()
+        return [
+            {
+                "id":            row["id"],
+                "name":          row["name"],
+                "domain":        row["domain"] or "",
+                "ip_ranges":     list(row["ip_ranges"] or []),
+                "panos_version": row["panos_version"] or "",
+                "api_keys":      {},
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.error(f"DB-Fehler beim Laden der Mandanten: {exc}")
+        return []
 
 
 def get_tenants_by_plan(plan: str = "all") -> list:
-    """Gibt alle Mandanten zurück — kein Plan-Filter mehr."""
-    return DEMO_TENANTS
+    return get_all_tenants()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
