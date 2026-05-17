@@ -18,7 +18,7 @@ export async function apiFetch(path, opts = {}) {
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) { clearToken(); clearTenantId(); window.location.reload(); return; }
+  if (res.status === 401) { clearToken(); clearTenantId(); window.location.reload(); throw new Error("401"); }
   if (!res.ok) {
     const e = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(e.detail || `HTTP ${res.status}`);
