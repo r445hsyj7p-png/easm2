@@ -79,11 +79,13 @@ def decode_jwt(token: str) -> dict:
 
 import hashlib as _hashlib, base64 as _base64
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# truncate_error=False: passlib never raises ValueError for long passwords.
+# _prepare_pw additionally pre-hashes with SHA-256 so bcrypt always
+# receives exactly 44 ASCII bytes — clean, deterministic, no truncation.
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto",
+                        bcrypt__truncate_error=False)
 
 def _prepare_pw(password: str) -> str:
-    # bcrypt truncates at 72 bytes — pre-hash with SHA-256 so any length works.
-    # SHA-256 → 32 bytes → base64 → 44 ASCII chars (always < 72 bytes)
     digest = _hashlib.sha256(password.encode("utf-8")).digest()
     return _base64.b64encode(digest).decode("ascii")
 
