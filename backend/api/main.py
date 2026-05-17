@@ -150,6 +150,16 @@ class FindingUpdateRequest(BaseModel):
 class ScanRequest(BaseModel):
     scan_type: str = "full"
 
+class DomainCreateRequest(BaseModel):
+    domain: str
+    ip_ranges: list[str] = []
+    panos_version: str = ""
+
+class DomainUpdateRequest(BaseModel):
+    status:        Optional[str]       = None
+    ip_ranges:     Optional[list[str]] = None
+    panos_version: Optional[str]       = None
+
 # ─── Request-ID Middleware ────────────────────────────────────────────────────
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -380,6 +390,94 @@ async def list_assets(
 ):
     ctx.assert_own_tenant(tenant_id)
     return await repo.list_assets(db, tenant_id, limit, offset)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOMAINS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/tenants/{tenant_id}/domains", tags=["Tenants"])
+async def list_domains(
+    tenant_id: str,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    return await repo.list_domains(db, tenant_id)
+
+
+@app.post("/api/v1/tenants/{tenant_id}/domains", tags=["Tenants"])
+async def create_domain(
+    tenant_id: str,
+    req: DomainCreateRequest,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    if not req.domain.strip():
+        raise HTTPException(status_code=422, detail="Domain darf nicht leer sein.")
+    try:
+        return await repo.create_domain(db, tenant_id, req.domain, req.ip_ranges, req.panos_version)
+    except Exception as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.patch("/api/v1/tenants/{tenant_id}/domains/{domain_id}", tags=["Tenants"])
+async def update_domain(
+    tenant_id: str,
+    domain_id: str,
+    req: DomainUpdateRequest,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    ok = await repo.update_domain(db, tenant_id, domain_id,
+                                   status=req.status, ip_ranges=req.ip_ranges,
+                                   panos_version=req.panos_version)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Domain nicht gefunden.")
+    return {"ok": True}
+
+
+@app.delete("/api/v1/tenants/{tenant_id}/domains/{domain_id}", tags=["Tenants"])
+async def delete_domain(
+    tenant_id: str,
+    domain_id: str,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    ok = await repo.delete_domain(db, tenant_id, domain_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Domain nicht gefunden.")
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SETTINGS (Schedule + Notifications)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/v1/tenants/{tenant_id}/settings", tags=["Tenants"])
+async def get_settings(
+    tenant_id: str,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    return await repo.get_settings(db, tenant_id)
+
+
+@app.put("/api/v1/tenants/{tenant_id}/settings", tags=["Tenants"])
+async def save_settings(
+    tenant_id: str,
+    request: Request,
+    ctx: AuthContext = Depends(get_auth),
+    db: AsyncSession  = Depends(get_db),
+):
+    ctx.assert_own_tenant(tenant_id)
+    settings = await request.json()
+    await repo.save_settings(db, tenant_id, settings)
+    return {"ok": True}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MCP

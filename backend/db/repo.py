@@ -444,3 +444,102 @@ async def ensure_default_tenant(db: AsyncSession) -> str:
     tenant_id = r2.scalar()  # fetch before commit — cursor closed after commit
     await db.commit()
     return str(tenant_id)
+
+
+# ─── Domains ─────────────────────────────────────────────────────────────────
+
+async def list_domains(db: AsyncSession, tenant_id: str) -> dict:
+    r = await db.execute(text("""
+        SELECT id, domain, fqdn, status,
+               COALESCE(ip_ranges, '{}')    AS ip_ranges,
+               last_scan, findings_count, risk_score,
+               COALESCE(panos_version, '')  AS panos_version,
+               created_at
+        FROM domains
+        WHERE tenant_id = :tid
+        ORDER BY created_at
+    """), {"tid": tenant_id})
+    rows = []
+    for row in r.mappings().all():
+        d = dict(row)
+        if d.get("last_scan"):
+            d["last_scan"] = d["last_scan"].isoformat()
+        if d.get("created_at"):
+            d["added"] = d.pop("created_at").strftime("%Y-%m-%d")
+        rows.append(d)
+    return {"domains": rows, "total": len(rows)}
+
+
+async def create_domain(
+    db: AsyncSession, tenant_id: str, domain: str,
+    ip_ranges: list, panos_version: str,
+) -> dict:
+    r = await db.execute(text("""
+        INSERT INTO domains (id, tenant_id, domain, fqdn, status, ip_ranges, panos_version, created_at)
+        VALUES (gen_random_uuid()::text, :tid, :domain, :domain, 'active', :ranges, :panos, NOW())
+        RETURNING id, domain, fqdn, status, ip_ranges, last_scan,
+                  findings_count, risk_score, panos_version, created_at
+    """), {
+        "tid": tenant_id, "domain": domain.strip().lower(),
+        "ranges": ip_ranges, "panos": panos_version or "",
+    })
+    row = r.mappings().first()  # read BEFORE commit
+    await db.commit()
+    if not row:
+        raise ValueError("Domain already exists")
+    d = dict(row)
+    if d.get("created_at"):
+        d["added"] = d.pop("created_at").strftime("%Y-%m-%d")
+    return d
+
+
+async def update_domain(
+    db: AsyncSession, tenant_id: str, domain_id: str,
+    status: str | None = None,
+    ip_ranges: list | None = None,
+    panos_version: str | None = None,
+) -> bool:
+    sets = []
+    params: dict = {"tid": tenant_id, "did": domain_id}
+    if status is not None:
+        sets.append("status = :status"); params["status"] = status
+    if ip_ranges is not None:
+        sets.append("ip_ranges = :ranges"); params["ranges"] = ip_ranges
+    if panos_version is not None:
+        sets.append("panos_version = :panos"); params["panos"] = panos_version
+    if not sets:
+        return True
+    r = await db.execute(
+        text(f"UPDATE domains SET {', '.join(sets)} WHERE id = :did AND tenant_id = :tid RETURNING id"),
+        params,
+    )
+    await db.commit()
+    return r.rowcount > 0
+
+
+async def delete_domain(db: AsyncSession, tenant_id: str, domain_id: str) -> bool:
+    r = await db.execute(
+        text("DELETE FROM domains WHERE id = :did AND tenant_id = :tid RETURNING id"),
+        {"did": domain_id, "tid": tenant_id},
+    )
+    await db.commit()
+    return r.rowcount > 0
+
+
+# ─── Tenant Settings (schedule + notifications) ───────────────────────────────
+
+async def get_settings(db: AsyncSession, tenant_id: str) -> dict:
+    r = await db.execute(
+        text("SELECT COALESCE(settings, '{}')::jsonb FROM tenants WHERE id = :tid"),
+        {"tid": tenant_id},
+    )
+    row = r.first()
+    return dict(row[0]) if row and row[0] else {}
+
+
+async def save_settings(db: AsyncSession, tenant_id: str, settings: dict) -> None:
+    await db.execute(
+        text("UPDATE tenants SET settings = :s::jsonb WHERE id = :tid"),
+        {"s": json.dumps(settings), "tid": tenant_id},
+    )
+    await db.commit()
