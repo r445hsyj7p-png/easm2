@@ -338,14 +338,7 @@ const AssetsTab = () => {
           <div style={{ background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 6, padding: 16 }}>
             <div style={{ fontFamily: T.fontSans, fontSize: 12, fontWeight: 600, color: T.text0, marginBottom: 10 }}>Geographic Asset Distribution</div>
             <GeoMiniMap
-              assets={intel?.geo_assets || [
-                { lat:50.11, lng:8.68,   city:"Frankfurt",  risk:"CRITICAL", ip_count:3 },
-                { lat:52.52, lng:13.40,  city:"Berlin",     risk:"HIGH",     ip_count:2 },
-                { lat:51.23, lng:6.78,   city:"Düsseldorf", risk:"HIGH",     ip_count:1 },
-                { lat:39.02, lng:-77.54, city:"Ashburn",    risk:"LOW",      ip_count:2 },
-                { lat:37.34, lng:-121.9, city:"San Jose",   risk:"LOW",      ip_count:1 },
-                { lat:52.37, lng:4.89,   city:"Amsterdam",  risk:"MEDIUM",   ip_count:1 },
-              ]}
+              assets={intel?.geo_assets || []}
               height={260}
             />
             <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
