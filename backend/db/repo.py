@@ -544,7 +544,7 @@ async def get_settings(db: AsyncSession, tenant_id: str) -> dict:
 
 async def save_settings(db: AsyncSession, tenant_id: str, settings: dict) -> None:
     await db.execute(
-        text("UPDATE tenants SET settings = :s::jsonb WHERE id = :tid"),
+        text("UPDATE tenants SET settings = CAST(:s AS jsonb) WHERE id = :tid"),
         {"s": json.dumps(settings), "tid": tenant_id},
     )
     await db.commit()
