@@ -14,7 +14,6 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 import uuid, json, os, secrets as _secrets, logging
-from passlib.context import CryptContext
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -78,22 +77,24 @@ def decode_jwt(token: str) -> dict:
 # ─── Password hashing ─────────────────────────────────────────────────────────
 
 import hashlib as _hashlib, base64 as _base64
+import bcrypt as _bcrypt
 
-# truncate_error=False: passlib never raises ValueError for long passwords.
-# _prepare_pw additionally pre-hashes with SHA-256 so bcrypt always
-# receives exactly 44 ASCII bytes — clean, deterministic, no truncation.
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto",
-                        bcrypt__truncate_error=False)
+# Use bcrypt directly (passlib[bcrypt] installs the bcrypt package).
+# SHA-256 pre-hash produces exactly 44 ASCII bytes — always under bcrypt's
+# 72-byte limit, and avoids passlib's truncate_error ValueError entirely.
 
-def _prepare_pw(password: str) -> str:
+def _prepare_pw(password: str) -> bytes:
     digest = _hashlib.sha256(password.encode("utf-8")).digest()
-    return _base64.b64encode(digest).decode("ascii")
+    return _base64.b64encode(digest)  # 44 bytes
 
 def hash_pw(password: str) -> str:
-    return _pwd_ctx.hash(_prepare_pw(password))
+    return _bcrypt.hashpw(_prepare_pw(password), _bcrypt.gensalt()).decode("utf-8")
 
 def verify_pw(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(_prepare_pw(plain), hashed)
+    try:
+        return _bcrypt.checkpw(_prepare_pw(plain), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 # ─── Auth context ─────────────────────────────────────────────────────────────
 

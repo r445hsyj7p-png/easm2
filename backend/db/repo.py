@@ -387,8 +387,9 @@ async def create_scan_job(
         VALUES (gen_random_uuid()::text, :tid, :type, 'pending', :by, NOW())
         RETURNING id
     """), {"tid": tenant_id, "type": scan_type, "by": triggered_by})
+    scan_id = r.scalar()  # fetch before commit — cursor closed after commit
     await db.commit()
-    return r.scalar()
+    return scan_id
 
 
 # ─── Users ───────────────────────────────────────────────────────────────────
