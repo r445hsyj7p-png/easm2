@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from "react";
+import { toast } from "sonner";
+import { Play, Loader2, CheckCircle, XCircle, Circle } from "lucide-react";
 import { T, TOOL_COLOR } from "../../theme";
 import { useApp } from "../../context/AppContext";
 
@@ -7,8 +9,10 @@ const ScanTimeline = ({ scans }) => (
     {scans.map((s,i) => (
       <div key={i} style={{ display:"flex", gap:10, position:"relative" }}>
         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:16 }}>
-          <div style={{ width:8, height:8, borderRadius:"50%", flexShrink:0, marginTop:4,
-            background: s.status==="completed" ? T.accent : s.status==="running" ? T.accent : T.text3 }}/>
+          {s.status==="completed" ? <CheckCircle size={12} color={T.accent} style={{ flexShrink:0, marginTop:2 }} /> :
+           s.status==="running"   ? <Loader2    size={12} color={T.accent} style={{ flexShrink:0, marginTop:2, animation:"spin 1s linear infinite" }} /> :
+           s.status==="error"     ? <XCircle    size={12} color={T.critical} style={{ flexShrink:0, marginTop:2 }} /> :
+                                    <Circle     size={12} color={T.text3}  style={{ flexShrink:0, marginTop:2 }} />}
           {i < scans.length-1 && <div style={{ width:1, flex:1, background:T.border, marginTop:2 }}/>}
         </div>
         <div style={{ flex:1, paddingBottom:14 }}>
@@ -16,7 +20,7 @@ const ScanTimeline = ({ scans }) => (
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, color:T.text0, fontWeight:600 }}>{s.label}</span>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
               color: s.status==="completed" ? T.accent : T.text3 }}>
-              {s.status==="completed" ? "✓" : "○"} {s.status}
+              {s.status}
             </span>
             <span style={{ marginLeft:"auto", fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>{s.time}</span>
           </div>
@@ -92,6 +96,7 @@ const ScansTab = () => {
 
   const startScan = () => {
     setRunning(true); setProgress(0); setPhase(0); setLogs([]);
+    toast.info("Scan gestartet", { description: "Pipeline läuft — Ergebnisse erscheinen live." });
     let p = 0, logI = 0;
     const interval = setInterval(() => {
       p = Math.min(p + 0.9, 100);
@@ -102,7 +107,10 @@ const ScansTab = () => {
         logI++;
       }
       setProgress(p);
-      if (p >= 100) { clearInterval(interval); setRunning(false); setPhase(-1); }
+      if (p >= 100) {
+        clearInterval(interval); setRunning(false); setPhase(-1);
+        toast.success("Scan abgeschlossen", { description: "35 Findings · Score: 48 · 202s" });
+      }
     }, 90);
   };
 
@@ -128,8 +136,11 @@ const ScansTab = () => {
               fontFamily:"'JetBrains Mono',monospace", fontSize:11, fontWeight:700,
               color: running ? T.text2 : T.bg0,
               cursor: running ? "not-allowed" : "pointer", letterSpacing:"0.06em",
+              display:"flex", alignItems:"center", gap:7,
             }}>
-              {running ? `SCANNING… ${Math.round(progress)}%` : "▶  START SCAN"}
+              {running
+                ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }} />{`SCANNING… ${Math.round(progress)}%`}</>
+                : <><Play size={13} />START SCAN</>}
             </button>
           </div>
           {/* Progress */}
@@ -160,9 +171,12 @@ const ScansTab = () => {
                   <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:10, fontWeight:600,
                     color: active||done ? T.text0 : T.text3, marginBottom:2 }}>{ph.label}</div>
                   <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:8, color:T.text3 }}>{ph.tool}</div>
-                  <div style={{ marginTop:5, fontFamily:"'JetBrains Mono',monospace", fontSize:9,
+                  <div style={{ marginTop:5, display:"flex", alignItems:"center", gap:4,
+                    fontFamily:"'JetBrains Mono',monospace", fontSize:9,
                     color: done ? T.accent : active ? T.accent : T.text3 }}>
-                    {done ? `✓ ${ph.secs}s` : active ? "running…" : `~${ph.secs}s`}
+                    {done ? <><CheckCircle size={9} />{ph.secs}s</> :
+                     active ? <><Loader2 size={9} style={{ animation:"spin 1s linear infinite" }} />running…</> :
+                     `~${ph.secs}s`}
                   </div>
                 </div>
               );

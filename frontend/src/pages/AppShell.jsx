@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { toast } from "sonner";
+import { RefreshCw, LogOut, Settings, Shield } from "lucide-react";
 import { T } from "../theme";
 import { useApp } from "../context/AppContext";
 import { apiFetch, clearToken, clearTenantId } from "../api/client";
@@ -95,6 +97,8 @@ export default function AppShell() {
         input[type=checkbox] { accent-color: ${T.accent}; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
         @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
       `}</style>
 
       {/* Top Navigation */}
@@ -106,9 +110,7 @@ export default function AppShell() {
             <div style={{ width: 28, height: 28, borderRadius: 6,
               background: "linear-gradient(135deg, #22c55e, #15803d)",
               display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={T.bg0} strokeWidth="2.5">
-                <path d="M12 2L3 7v5c0 5.5 3.8 10.7 9 12 5.2-1.3 9-6.5 9-12V7L12 2z"/>
-              </svg>
+                  <Shield size={16} color={T.bg0} strokeWidth={2.5} />
             </div>
             <div>
               <div style={{ fontFamily: T.font, fontSize: 13, fontWeight: 700, color: T.text0, letterSpacing: "0.02em" }}>EASM</div>
@@ -138,11 +140,18 @@ export default function AppShell() {
             <div style={{ fontFamily: T.font, fontSize: 9, color: T.text3 }}>
               Nächster: <span style={{ color: T.accent }}>{nextScanStr}</span>
             </div>
-            <Btn onClick={() => triggerScan("full")} variant="primary" size="sm">↺ SCAN NOW</Btn>
+            <Btn onClick={() => {
+              triggerScan("full");
+              toast.success("Scan gestartet", { description: "Full-Pipeline läuft im Hintergrund." });
+            }} variant="primary" size="sm">
+              <RefreshCw size={10} />SCAN NOW
+            </Btn>
             <button onClick={() => { clearToken(); clearTenantId(); window.location.reload(); }}
               style={{ background: "transparent", border: `1px solid ${T.border}`,
                 borderRadius: 4, padding: "4px 10px", fontFamily: T.font, fontSize: 9,
-                color: T.text3, cursor: "pointer" }}>Logout</button>
+                color: T.text3, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+              <LogOut size={9} />Logout
+            </button>
           </div>
         </div>
 
@@ -179,10 +188,7 @@ export default function AppShell() {
             fontFamily: T.fontSans, fontSize: 12, fontWeight: tab === "admin" ? 600 : 400,
             color: tab === "admin" ? T.accent : T.text2, cursor: "pointer",
             display: "flex", alignItems: "center", gap: 6, marginBottom: -1 }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-            Settings
+            <Settings size={12} />Settings
           </button>
           <div style={{ width: 1, height: 20, background: T.border, margin: "0 12px" }}/>
           <span style={{ fontFamily: T.font, fontSize: 9, color: T.text3 }}>{now}</span>

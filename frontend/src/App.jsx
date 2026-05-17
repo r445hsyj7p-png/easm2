@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Toaster } from "sonner";
 import { getToken, clearToken, clearTenantId, getTenantId, saveTenantId } from "./api/client";
 import { AppProvider } from "./context/AppContext";
 import LoginPage from "./pages/LoginPage";
@@ -23,6 +24,11 @@ export default function App() {
 
   return (
     <AppProvider tenantId={tenantId}>
+      <Toaster
+        position="bottom-right"
+        theme="dark"
+        toastOptions={{ style: { fontFamily: "'JetBrains Mono', monospace", fontSize: 11 } }}
+      />
       <AppShell />
     </AppProvider>
   );
