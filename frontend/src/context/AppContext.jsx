@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, createContext, useContext } from "react";
-import { apiFetch } from "../api/client";
+import { apiFetch, clearToken, clearTenantId } from "../api/client";
 
 export const AppCtx = createContext(null);
 export function useApp() { return useContext(AppCtx); }
@@ -34,8 +34,17 @@ export function AppProvider({ tenantId, children }) {
       ]);
       setTenant(t); setFindings(f.findings??f); setAssets(a.assets??a);
       setMcp(m.servers??m); setIntel(i); setScans(s.scans??s);
-    } catch(e) { setError(e.message); }
-    finally    { setLoading(false); }
+    } catch(e) {
+      // Tenant not found → stale session after re-deployment; force fresh login
+      if (e.message?.includes("404") || e.message?.includes("nicht gefunden") || e.message?.includes("not found")) {
+        clearToken();
+        clearTenantId();
+        window.location.reload();
+        return;
+      }
+      setError(e.message);
+    }
+    finally { setLoading(false); }
   }, [tenantId]);
 
   useEffect(() => { load(); }, [load]);
