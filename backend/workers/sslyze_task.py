@@ -262,7 +262,7 @@ def _scan_target(host: str, port: int) -> list:
 
                     # Self-signed
                     if chain.path_validation_results:
-                        all_failed = all(
+                        all_failed = bool(chain.path_validation_results) and all(
                             not r.was_validation_successful
                             for r in chain.path_validation_results
                         )

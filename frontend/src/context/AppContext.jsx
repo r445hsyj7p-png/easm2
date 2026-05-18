@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { apiFetch, clearToken, clearTenantId } from "../api/client";
 
 export const AppCtx = createContext(null);
@@ -79,8 +79,13 @@ export function AppProvider({ tenantId, children }) {
     return normalized;
   }, [tenantId]);
 
+  const ctx = useMemo(
+    () => ({tenant,findings,assets,mcp,intel,scans,loading,error,reload:load,refresh,updateFinding,triggerScan,tenantId}),
+    [tenant,findings,assets,mcp,intel,scans,loading,error,load,refresh,updateFinding,triggerScan,tenantId]
+  );
+
   return (
-    <AppCtx.Provider value={{tenant,findings,assets,mcp,intel,scans,loading,error,reload:load,refresh,updateFinding,triggerScan,tenantId}}>
+    <AppCtx.Provider value={ctx}>
       {children}
     </AppCtx.Provider>
   );

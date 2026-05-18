@@ -26,7 +26,7 @@ const ScanTimeline = ({ scans }) => (
             <span style={{ marginLeft:"auto", fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>{s.time}</span>
           </div>
           <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-            {s.tags.map(tag => (
+            {(s.tags||[]).map(tag => (
               <span key={tag} style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
                 color:T.text2, background:T.bg3, border:`1px solid ${T.border}`,
                 padding:"1px 6px", borderRadius:3 }}>{tag}</span>

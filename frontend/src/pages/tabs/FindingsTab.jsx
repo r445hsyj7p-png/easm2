@@ -24,18 +24,18 @@ const FindingsTab = () => {
     )
     .sort((a, b) => {
       let cmp = 0;
-      if (sort.col === "sev")   cmp = SEV_ORDER[a.sev] - SEV_ORDER[b.sev];
+      if (sort.col === "sev")   cmp = (SEV_ORDER[a.sev]??99) - (SEV_ORDER[b.sev]??99);
       if (sort.col === "cvss")  cmp = (b.cvss||0) - (a.cvss||0);
       if (sort.col === "epss")  cmp = (parseFloat(b.epss)||0) - (parseFloat(a.epss)||0);
       if (sort.col === "kev")   cmp = (b.kev?1:0) - (a.kev?1:0);
-      if (sort.col === "age")   cmp = b.age - a.age;
+      if (sort.col === "age")   cmp = (b.age||0) - (a.age||0);
       if (sort.col === "title") cmp = (a.title||"").localeCompare(b.title||"");
       return sort.dir === "asc" ? cmp : -cmp;
     });
 
   const toggleSort = (col) => setSort(s => s.col === col ? { col, dir: s.dir === "asc" ? "desc" : "asc" } : { col, dir: "asc" });
   const cats = [...new Set((findings||[]).map(f=>f.cat).filter(Boolean))];
-  const tools = [...new Set((findings||[]).map(f=>f.tool))];
+  const tools = [...new Set((findings||[]).map(f=>f.tool).filter(Boolean))];
 
   return (
     <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>

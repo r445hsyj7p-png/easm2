@@ -225,7 +225,14 @@ async def list_assets(
 
 
 async def upsert_asset(db: AsyncSession, tenant_id: str, a: dict):
-    import json as _json
+    import json as _json, socket as _sock
+    # Validate IP before passing to PostgreSQL ::inet cast
+    raw_ip = a.get("ip")
+    try:
+        _sock.inet_aton(str(raw_ip)) if raw_ip else None
+        valid_ip = raw_ip
+    except (OSError, TypeError):
+        valid_ip = None
     await db.execute(text("""
         INSERT INTO assets
             (id, tenant_id, fqdn, ip, org, asn, ports, risk, sources, takeover,
@@ -236,7 +243,7 @@ async def upsert_asset(db: AsyncSession, tenant_id: str, a: dict):
         ON CONFLICT DO NOTHING
     """), {
         "tid": tenant_id, "fqdn": a.get("fqdn"),
-        "ip": a.get("ip"), "org": a.get("org"), "asn": a.get("asn"),
+        "ip": valid_ip, "org": a.get("org"), "asn": a.get("asn"),
         "ports": a.get("ports", []), "risk": a.get("risk", "LOW"),
         "sources": a.get("sources", []), "takeover": bool(a.get("takeover")),
         "technologies": _json.dumps(a.get("technologies", [])),
@@ -329,7 +336,7 @@ async def get_intel(db: AsyncSession, tenant_id: str) -> dict:
         LIMIT 1
     """), {"tid": tenant_id})
     row = r.first()
-    return dict(row[0]) if row else {}
+    return dict(row[0]) if row and row[0] else {}
 
 
 async def upsert_intel(db: AsyncSession, tenant_id: str, data: dict):

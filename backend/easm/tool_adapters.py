@@ -707,6 +707,8 @@ class HTTPXAdapter:
 
                 # 2. Technologie-Fingerprinting
                 for t in tech:
+                    if not t or not isinstance(t, str):
+                        continue
                     t_name = t.split(":")[0] if ":" in t else t
                     if t_name in self.RISKY_TECH:
                         sev, rem = self.RISKY_TECH[t_name]
@@ -1171,7 +1173,7 @@ class RampartsAdapter:
 
         # 2. Tools auflisten
         tools_resp = mcp_request("tools/list")
-        tools = tools_resp.get("result", {}).get("tools", [])
+        tools = tools_resp.get("result", {}).get("tools", []) or []
 
         if not tools:
             return findings
