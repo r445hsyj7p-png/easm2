@@ -853,6 +853,7 @@ def _update_scan_status(job_id: str, status: str,
     if not db_url:
         logger.error("DATABASE_URL nicht gesetzt — Status-Update übersprungen")
         return
+    conn = None
     try:
         conn = psycopg2.connect(db_url)
         with conn.cursor() as cur:
@@ -891,10 +892,15 @@ def _update_scan_status(job_id: str, status: str,
                     job_id,
                 ))
         conn.commit()
-        conn.close()
         logger.info(f"[{job_id[:8]}] Status → {status}")
     except Exception as exc:
         logger.error(f"_update_scan_status DB-Fehler: {exc}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
@@ -903,6 +909,7 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
     db_url = os.getenv("DATABASE_URL", "")
     if not db_url:
         return
+    conn = None
     try:
         conn = psycopg2.connect(db_url)
         with conn.cursor() as cur:
@@ -913,9 +920,14 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
                 WHERE id = %s
             """, (pct, phase, job_id))
         conn.commit()
-        conn.close()
     except Exception as exc:
         logger.warning(f"_update_scan_progress failed: {exc}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _resolve_assets(fqdns: list, hosts: list) -> tuple:
@@ -1008,12 +1020,27 @@ def _resolve_assets(fqdns: list, hosts: list) -> tuple:
 
 def _save_report(tenant_id: str, job_id: str, report):
     """Speichert Findings, Assets, MCP-Server und Score in DB."""
-    import psycopg2, psycopg2.extras, hashlib as _hl
+    import psycopg2, psycopg2.extras, hashlib as _hl, socket as _sock_v
     db_url = os.getenv("DATABASE_URL", "")
     if not db_url:
         logger.error("DATABASE_URL nicht gesetzt — Report nicht gespeichert")
         return
 
+    def _safe_ip(ip_str):
+        if not ip_str or not isinstance(ip_str, str):
+            return None
+        try:
+            _sock_v.inet_aton(ip_str)
+            return ip_str
+        except (OSError, TypeError):
+            try:
+                import socket as _s6
+                _s6.inet_pton(_s6.AF_INET6, ip_str)
+                return ip_str
+            except (OSError, TypeError):
+                return None
+
+    conn = None
     try:
         conn = psycopg2.connect(db_url)
         saved_findings = 0
@@ -1066,7 +1093,7 @@ def _save_report(tenant_id: str, job_id: str, report):
                 if fqdn in seen_assets:
                     continue
                 seen_assets.add(fqdn)
-                _ip  = _ip_map.get(fqdn)
+                _ip  = _safe_ip(_ip_map.get(fqdn))
                 _org, _asn = _rdap_map.get(_ip, ("", 0)) if _ip else ("", 0)
                 cur.execute("""
                     INSERT INTO assets
@@ -1085,7 +1112,7 @@ def _save_report(tenant_id: str, job_id: str, report):
             for host, ports in report.open_ports.items():
                 port_list = [int(p) for p in ports
                              if isinstance(p, int) or (isinstance(p, str) and p.isdigit())]
-                _ip  = _ip_map.get(host, host)
+                _ip  = _safe_ip(_ip_map.get(host, host))
                 _org, _asn = _rdap_map.get(_ip, ("", 0)) if _ip else ("", 0)
                 cur.execute("""
                     INSERT INTO assets
@@ -1199,7 +1226,6 @@ def _save_report(tenant_id: str, job_id: str, report):
             """, (tenant_id, json.dumps(intel_data)))
 
         conn.commit()
-        conn.close()
         logger.info(
             f"[{tenant_id}] Report gespeichert: "
             f"{saved_findings} Findings, {saved_assets} Assets, {saved_mcp} MCP-Server"
@@ -1208,6 +1234,12 @@ def _save_report(tenant_id: str, job_id: str, report):
         logger.error(f"_save_report DB-Fehler: {exc}")
         import traceback
         logger.error(traceback.format_exc())
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
