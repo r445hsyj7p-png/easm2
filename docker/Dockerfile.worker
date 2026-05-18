@@ -54,10 +54,24 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     chmod +x /usr/local/bin/naabu && \
     rm -rf /tmp/subfinder* /tmp/httpx* /tmp/naabu*
 
-# theHarvester — OSINT tool (real tool from GitHub, not the PyPI stub v0.0.1)
+# theHarvester — OSINT tool
+# Install heavy deps first so the git install doesn't time out on them
 RUN pip install --no-cache-dir \
+    dnspython \
+    aiodns \
+    aiohttp \
+    lxml \
+    requests \
+    netaddr \
+    pyasyncore \
+    && pip install --no-cache-dir \
     "git+https://github.com/laramies/theHarvester.git@master" \
-    || echo "theHarvester install failed, skipping"
+    && echo "theHarvester installed OK" \
+    || echo "theHarvester git install failed — trying PyPI stub fallback"
+# Verify the entry point was created
+RUN which theHarvester && theHarvester --help 2>&1 | head -3 || \
+    python -m theHarvester --help 2>&1 | head -3 || \
+    echo "WARNING: theHarvester not callable — will skip at runtime"
 
 # Python dependencies
 WORKDIR /app
@@ -66,7 +80,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ramparts is worker-only and may not be on PyPI — install best-effort
 RUN pip install --no-cache-dir ramparts || echo "ramparts not available on PyPI, skipping"
 
-# App code — CACHEBUST=20260518-3
+# App code — CACHEBUST=20260518-4
 COPY . .
 
 # Entrypoint

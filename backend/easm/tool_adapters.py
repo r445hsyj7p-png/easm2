@@ -541,12 +541,34 @@ class TheHarvesterAdapter:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             output_file = tf.name
 
-        _avail = tool_available("theHarvester")
+        # Try binary first, then python -m theHarvester as module fallback
+        _binary_avail = tool_available("theHarvester")
+        _module_avail = False
+        if not _binary_avail:
+            try:
+                import subprocess as _sp
+                _r = _sp.run(
+                    ["python", "-m", "theHarvester", "--help"],
+                    capture_output=True, timeout=10
+                )
+                _module_avail = _r.returncode == 0
+            except Exception:
+                pass
+
+        _avail = _binary_avail or _module_avail
+        _invoke = (["theHarvester"] if _binary_avail
+                   else ["python", "-m", "theHarvester"] if _module_avail
+                   else None)
+
         if log_fn:
-            log_fn("theharvester", f"binary {'verfügbar' if _avail else 'NICHT gefunden — übersprungen'}", "info" if _avail else "warn")
+            if _binary_avail:
+                log_fn("theharvester", "binary verfügbar", "info")
+            elif _module_avail:
+                log_fn("theharvester", "binary nicht gefunden, nutze python -m theHarvester", "warn")
+            else:
+                log_fn("theharvester", "binary NICHT gefunden und python-Modul nicht verfügbar — übersprungen", "warn")
 
         if not _avail:
-            # Clean up the temp file and return empty — no fallback for theHarvester
             try:
                 os.unlink(output_file)
             except Exception:
@@ -554,12 +576,11 @@ class TheHarvesterAdapter:
             return []
 
         try:
-            cmd = [
-                "theHarvester",
+            cmd = _invoke + [
                 "-d", domain,
                 "-b", sources,
                 "-l", str(limit),
-                "-f", output_file.replace(".json", ""),  # theHarvester fügt .json hinzu
+                "-f", output_file.replace(".json", ""),
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
@@ -895,7 +916,7 @@ class HTTPXAdapter:
                         raw_data=entry,
                     ))
 
-            except (json.JSONDecodeError, KeyError, StopIteration):
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 pass
 
         return findings
@@ -955,25 +976,28 @@ class NucleiAdapter:
             log_fn: Optionale Log-Funktion (tool, msg, level)
         """
         _avail = tool_available(self.binary)
-        if log_fn:
-            _home = os.path.expanduser("~")
-            _tmpl_dir = os.path.join(_home, "nuclei-templates")
-            _tmpl_exists = os.path.isdir(_tmpl_dir)
+        _home = os.path.expanduser("~")
+        _tmpl_dir = os.path.join(_home, "nuclei-templates")
+        _tmpl_exists = os.path.isdir(_tmpl_dir)
+        try:
             _tmpl_count = sum(1 for _ in Path(_tmpl_dir).rglob("*.yaml")) if _tmpl_exists else 0
-            log_fn("nuclei", f"binary {'verfügbar' if _avail else 'NICHT gefunden'} | templates: {_tmpl_count} .yaml Dateien in {_tmpl_dir}", "info" if _avail else "error")
+        except Exception:
+            _tmpl_count = 0
+        if log_fn:
+            log_fn("nuclei",
+                   f"binary {'verfügbar' if _avail else 'NICHT gefunden'} | "
+                   f"templates: {_tmpl_count} .yaml in {_tmpl_dir}",
+                   "info" if _avail else "error")
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
-                                          delete=False) as tf:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
             tf.write("\n".join(targets))
             target_file = tf.name
 
         if log_fn:
-            preview = targets[:5]
-            log_fn("nuclei", f"{len(targets)} Targets | erste: {preview}", "info")
+            log_fn("nuclei", f"{len(targets)} Targets | erste: {targets[:8]}", "info")
 
         try:
             # Standard-Templates wenn keine angegeben
-            # Correct nuclei v3 tag names: default-logins (not default-login)
             if not template_dirs and not tags:
                 tags = "api,exposure,misconfig,default-logins,mcp,tech"
 
@@ -981,13 +1005,13 @@ class NucleiAdapter:
                 self.binary if _avail else "nuclei",
                 "-l", target_file,
                 "-json",
-                "-silent",
                 "-severity", severity_filter,
                 "-rate-limit", str(rate_limit),
                 "-bulk-size", str(bulk_size),
                 "-timeout", "10",
                 "-retries", "1",
                 "-no-color",
+                "-stats",        # writes template/target counts to stderr — critical for diagnosis
             ]
 
             if template_dirs:
@@ -997,9 +1021,11 @@ class NucleiAdapter:
                 cmd += ["-tags", tags]
 
             # Only disable update check if templates already exist locally
-            _home = os.path.expanduser("~")
-            _tmpl_dir = os.path.join(_home, "nuclei-templates")
-            _tmpl_has_content = os.path.isdir(_tmpl_dir) and any(os.scandir(_tmpl_dir))
+            if _tmpl_exists:
+                with os.scandir(_tmpl_dir) as _sd:
+                    _tmpl_has_content = any(_sd)
+            else:
+                _tmpl_has_content = False
             if _tmpl_has_content:
                 cmd += ["-duc"]
 
@@ -1013,19 +1039,24 @@ class NucleiAdapter:
 
             rc, stdout, stderr = _run(cmd, timeout=900)
             findings = self._parse(tenant_id, stdout, stderr, rc)
+
+            # Always log stderr — nuclei writes template/target counts there via -stats
+            _stderr_full = (stderr or "").strip()
+            _stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
             if log_fn:
-                stderr_snippet = (stderr or "").strip()[:500]
-                stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
+                if _stderr_full:
+                    # Log stderr in chunks of 400 chars so nothing is cut off
+                    for _i in range(0, min(len(_stderr_full), 1200), 400):
+                        log_fn("nuclei", f"stderr: {_stderr_full[_i:_i+400]}", "info")
                 if rc != 0 and not stdout.strip():
-                    log_fn("nuclei", f"rc={rc} FEHLER — keine Ausgabe | stderr: {stderr_snippet}", "error")
+                    log_fn("nuclei", f"rc={rc} FEHLER — kein stdout", "error")
                 elif rc != 0:
-                    log_fn("nuclei", f"rc={rc} | {stdout_lines} JSON-Zeilen → {len(findings)} Findings | stderr: {stderr_snippet[:200]}", "warn")
+                    log_fn("nuclei", f"rc={rc} | {_stdout_lines} JSON-Zeilen → {len(findings)} Findings", "warn")
                 else:
-                    log_fn("nuclei", f"rc=0 | {stdout_lines} JSON-Zeilen → {len(findings)} Findings geparst", "info")
-                    if stdout_lines > 0 and len(findings) == 0:
-                        # Parsing failed — log first raw line for debugging
-                        first_line = next((l for l in stdout.splitlines() if l.strip()), "")
-                        log_fn("nuclei", f"Parse-Fehler? Erste Ausgabezeile: {first_line[:300]}", "warn")
+                    log_fn("nuclei", f"rc=0 | {_stdout_lines} JSON-Zeilen → {len(findings)} Findings", "info")
+                if _stdout_lines > 0 and len(findings) == 0:
+                    first_line = next((l for l in stdout.splitlines() if l.strip()), "")
+                    log_fn("nuclei", f"Parse-Fehler? Erste stdout-Zeile: {first_line[:400]}", "warn")
             return findings
 
         finally:
