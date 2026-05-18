@@ -116,7 +116,7 @@ class SubfinderAdapter:
         self.api_keys = api_keys or {}
         self.binary = "subfinder"
 
-    def run(self, tenant_id: str, domain: str, recursive: bool = False) -> list[ToolFinding]:
+    def run(self, tenant_id: str, domain: str, recursive: bool = False, log_fn=None) -> list[ToolFinding]:
         """
         Startet Subfinder-Scan für eine Domain.
 
@@ -124,11 +124,15 @@ class SubfinderAdapter:
             tenant_id: Mandanten-ID
             domain: Ziel-Domain (z.B. "example.de")
             recursive: Auch Subdomains von Subdomains scannen
+            log_fn: Optionale Log-Funktion (tool, msg, level)
 
         Returns:
             Liste von ToolFinding-Objekten
         """
-        if not tool_available(self.binary):
+        _avail = tool_available(self.binary)
+        if log_fn:
+            log_fn("subfinder", f"binary {'verfügbar' if _avail else 'NICHT gefunden — Docker-Fallback'}", "info" if _avail else "warn")
+        if not _avail:
             return self._fallback_docker(tenant_id, domain)
 
         # Konfigurationsdatei mit API-Keys erstellen
@@ -151,6 +155,12 @@ class SubfinderAdapter:
                 cmd += ["-recursive"]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
+            if log_fn:
+                n_lines = len([l for l in stdout.splitlines() if l.strip()])
+                if rc != 0:
+                    log_fn("subfinder", f"rc={rc} | stderr: {(stderr or '').strip()[:200]}", "error")
+                else:
+                    log_fn("subfinder", f"rc=0, {n_lines} JSON-Zeilen ausgegeben", "info")
             return self._parse(tenant_id, domain, stdout, stderr, rc)
 
         finally:
@@ -299,14 +309,20 @@ class NaabuAdapter:
 
     def run(self, tenant_id: str, targets: list[str],
             ports: str = "top-1000", rate: int = 1000,
-            nmap_integration: bool = False) -> list[ToolFinding]:
+            nmap_integration: bool = False,
+            log_fn=None) -> list[ToolFinding]:
         """
         Args:
             targets: Liste von IPs, Ranges oder Hostnamen
             ports: "top-100", "top-1000", "full" oder "80,443,8080,..."
             rate: Pakete/Sekunde (Standard: 1000, max ~10000)
             nmap_integration: Nmap für Service-Detection nach Port-Scan
+            log_fn: Optionale Log-Funktion (tool, msg, level)
         """
+        _avail = tool_available(self.binary)
+        if log_fn:
+            log_fn("naabu", f"binary {'verfügbar' if _avail else 'NICHT gefunden — Docker-Fallback'}", "info" if _avail else "warn")
+
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
                                           delete=False) as tf:
             tf.write("\n".join(targets))
@@ -314,7 +330,7 @@ class NaabuAdapter:
 
         try:
             cmd = [
-                self.binary if tool_available(self.binary) else "naabu",
+                self.binary if _avail else "naabu",
                 "-list", target_file,
                 "-json",
                 "-silent",
@@ -336,10 +352,15 @@ class NaabuAdapter:
                 cmd += ["-nmap-cli", "nmap -sV -sC"]
 
             # Docker-Fallback
-            if not tool_available(self.binary):
+            if not _avail:
                 return self._run_docker(tenant_id, targets, ports, rate)
 
             rc, stdout, stderr = _run(cmd, timeout=600)
+            if log_fn:
+                if rc != 0 and not stdout.strip():
+                    log_fn("naabu", f"rc={rc} | stderr: {(stderr or '').strip()[:200]}", "error" if rc > 0 else "warn")
+                else:
+                    log_fn("naabu", f"rc={rc}, {len(stdout.splitlines())} Zeilen stdout", "info")
             return self._parse(tenant_id, stdout, stderr, rc)
 
         finally:
@@ -427,12 +448,14 @@ class TheHarvesterAdapter:
     FULL_SOURCES = "bing,google,duckduckgo,linkedin,github,crtsh,dnsdumpster,otx"
 
     def run(self, tenant_id: str, domain: str,
-            limit: int = 500, use_full_sources: bool = False) -> list[ToolFinding]:
+            limit: int = 500, use_full_sources: bool = False,
+            log_fn=None) -> list[ToolFinding]:
         """
         Args:
             domain: Ziel-Domain
             limit: Maximale Anzahl Ergebnisse pro Quelle
             use_full_sources: LinkedIn + GitHub (mehr Ergebnisse)
+            log_fn: Optionale Log-Funktion (tool, msg, level)
         """
         sources = self.FULL_SOURCES if use_full_sources else self.FREE_SOURCES
 
@@ -601,13 +624,19 @@ class HTTPXAdapter:
 
     def run(self, tenant_id: str, urls: list[str],
             take_screenshots: bool = True,
-            threads: int = 50) -> list[ToolFinding]:
+            threads: int = 50,
+            log_fn=None) -> list[ToolFinding]:
         """
         Args:
             urls: Liste von URLs oder hosts (httpx fügt http/https hinzu)
             take_screenshots: headless Chrome Screenshots (braucht Chrome)
             threads: Parallelität
+            log_fn: Optionale Log-Funktion (tool, msg, level)
         """
+        _avail = tool_available(self.binary)
+        if log_fn:
+            log_fn("httpx", f"binary {'verfügbar' if _avail else 'NICHT gefunden — Docker-Fallback'}", "info" if _avail else "warn")
+
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
                                           delete=False) as tf:
             tf.write("\n".join(urls))
@@ -615,7 +644,7 @@ class HTTPXAdapter:
 
         try:
             cmd = [
-                self.binary if tool_available(self.binary) else "httpx",
+                self.binary if _avail else "httpx",
                 "-l", input_file,
                 "-json",
                 "-silent",
@@ -640,10 +669,15 @@ class HTTPXAdapter:
                 cmd += ["-screenshot", "-screenshot-type", "jpeg",
                         "-screenshot-timeout", "10"]
 
-            if not tool_available(self.binary):
+            if not _avail:
                 return self._run_docker(tenant_id, urls, take_screenshots)
 
             rc, stdout, stderr = _run(cmd, timeout=600)
+            if log_fn:
+                if rc != 0 and not stdout.strip():
+                    log_fn("httpx", f"rc={rc} | stderr: {(stderr or '').strip()[:200]}", "error" if rc > 0 else "warn")
+                else:
+                    log_fn("httpx", f"rc={rc}, {len(stdout.splitlines())} Zeilen stdout", "info")
             return self._parse(tenant_id, stdout, stderr, rc)
 
         finally:
