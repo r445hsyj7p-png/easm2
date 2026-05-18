@@ -135,25 +135,27 @@ class SubfinderAdapter:
         if not _avail:
             return self._fallback_docker(tenant_id, domain, log_fn)
 
-        # Konfigurationsdatei mit API-Keys erstellen
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml',
-                                         delete=False) as cfg:
-            cfg_content = self._build_config()
-            cfg.write(cfg_content)
-            cfg_path = cfg.name
+        cmd = [
+            self.binary,
+            "-d", domain,
+            "-json",
+            "-silent",
+            "-all",                    # Alle Quellen nutzen
+        ]
+        if recursive:
+            cmd += ["-recursive"]
+
+        # Provider config only when API keys are present (empty config causes warnings)
+        cfg_path = None
+        cfg_content = self._build_config()
+        if cfg_content.strip():
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml',
+                                             delete=False) as cfg:
+                cfg.write(cfg_content)
+                cfg_path = cfg.name
+            cmd += ["-provider-config", cfg_path]
 
         try:
-            cmd = [
-                self.binary,
-                "-d", domain,
-                "-json",
-                "-silent",
-                "-all",                    # Alle Quellen nutzen
-                "-provider-config", cfg_path,
-            ]
-            if recursive:
-                cmd += ["-recursive"]
-
             rc, stdout, stderr = _run(cmd, timeout=300)
             if log_fn:
                 n_lines = len([l for l in stdout.splitlines() if l.strip()])
@@ -164,7 +166,8 @@ class SubfinderAdapter:
             return self._parse(tenant_id, domain, stdout, stderr, rc)
 
         finally:
-            os.unlink(cfg_path)
+            if cfg_path and os.path.exists(cfg_path):
+                os.unlink(cfg_path)
 
     def run_docker(self, tenant_id: str, domain: str) -> list[ToolFinding]:
         """Fallback: Subfinder via Docker"""
@@ -538,6 +541,18 @@ class TheHarvesterAdapter:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             output_file = tf.name
 
+        _avail = tool_available("theHarvester")
+        if log_fn:
+            log_fn("theharvester", f"binary {'verfügbar' if _avail else 'NICHT gefunden — übersprungen'}", "info" if _avail else "warn")
+
+        if not _avail:
+            # Clean up the temp file and return empty — no fallback for theHarvester
+            try:
+                os.unlink(output_file)
+            except Exception:
+                pass
+            return []
+
         try:
             cmd = [
                 "theHarvester",
@@ -545,10 +560,14 @@ class TheHarvesterAdapter:
                 "-b", sources,
                 "-l", str(limit),
                 "-f", output_file.replace(".json", ""),  # theHarvester fügt .json hinzu
-                "--dns-lookup",
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
+            if log_fn:
+                if rc != 0:
+                    log_fn("theharvester", f"rc={rc} | stderr: {(stderr or '').strip()[:200]}", "error")
+                else:
+                    log_fn("theharvester", f"rc=0, Ausgabe geparst", "info")
             return self._parse_json(tenant_id, domain, output_file, stdout)
 
         finally:
