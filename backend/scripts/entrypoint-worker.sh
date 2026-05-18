@@ -22,11 +22,19 @@ STAMP_FILE="/tmp/.nuclei-updated"
 # Update templates once per day or on first start
 if [ ! -f "$STAMP_FILE" ] || [ "$(find "$STAMP_FILE" -mtime +1 2>/dev/null)" ]; then
     echo "[entrypoint] Aktualisiere Nuclei-Templates nach ${TEMPLATES_DIR}..."
-    # nuclei v3: -ut is the short form, -update-templates also still works
-    nuclei -update-templates -ud "${TEMPLATES_DIR}" -silent 2>&1 || \
-    nuclei -ut -ud "${TEMPLATES_DIR}" -silent 2>&1 || \
+    # nuclei v3: use default template dir (~/nuclei-templates) so runtime scans find them
+    # -ud sets where templates are stored; omit -silent so errors are visible
+    nuclei -update-templates -ud "${TEMPLATES_DIR}" 2>&1 || \
+    nuclei -ut -ud "${TEMPLATES_DIR}" 2>&1 || \
     echo "[entrypoint] Template-Update fehlgeschlagen — fahre ohne aktuelle Templates fort"
     touch "$STAMP_FILE"
+fi
+
+# Verify templates were actually downloaded
+TMPL_COUNT=$(find "${TEMPLATES_DIR}" -name "*.yaml" 2>/dev/null | wc -l || echo 0)
+if [ "$TMPL_COUNT" -eq 0 ]; then
+    echo "[entrypoint] WARNUNG: Keine Templates in ${TEMPLATES_DIR} — versuche nuclei ohne -ud..."
+    nuclei -update-templates 2>&1 || true
 fi
 
 # Log template count for diagnostics

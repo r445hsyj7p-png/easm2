@@ -293,7 +293,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
                 subdomains.append(_root_finding)
             sub_count = len(report.subdomains_discovered)
             _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains/Domains gefunden", "info")
-            email_count = len([f for f in report.all_findings if f.category == "email"])
+            email_count = len([f for f in report.findings_theharvester if f.category == "email"])
             if email_count:
                 _log_scan_event(job_id, "theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt", "info")
 
@@ -313,8 +313,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             tls_targets = pipeline._build_tls_targets(open_ports, subdomains)
             _log_scan_event(job_id, "sslyze", f"TLS-Analyse auf {len(tls_targets)} Endpunkten", "info")
             pipeline._phase_tls(report, tls_targets)
-            tls_findings = [f for f in report.all_findings if f.tool == "sslyze"]
-            _log_scan_event(job_id, "sslyze", f"{len(tls_findings)} TLS-Findings (Protokoll, Cipher, Zertifikat)", "info")
+            _log_scan_event(job_id, "sslyze", f"{len(report.findings_sslyze)} TLS-Findings (Protokoll, Cipher, Zertifikat)", "info")
 
             _progress(50, "http")
             http_targets = pipeline._build_http_targets(open_ports, subdomains)
@@ -325,15 +324,13 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
                         http_targets.append(_root)
             _log_scan_event(job_id, "httpx", f"HTTP-Probing auf {len(http_targets)} URLs (Tech-Stack, Expositionen)", "info")
             pipeline._phase_http(report, http_targets)
-            http_findings = [f for f in report.all_findings if f.tool == "httpx"]
-            _log_scan_event(job_id, "httpx", f"{len(http_findings)} HTTP-Findings", "info")
+            _log_scan_event(job_id, "httpx", f"{len(report.findings_httpx)} HTTP-Findings", "info")
 
             _progress(70, "vuln")
             _log_scan_event(job_id, "nuclei", f"Vulnerability-Scan auf {len(http_targets)} Targets (CVE, Misconfig, API)", "info")
             pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), list(mcp_hosts))
-            vuln_findings = [f for f in report.all_findings if f.tool == "nuclei"]
-            _log_scan_event(job_id, "nuclei", f"{len(vuln_findings)} Vulnerabilities gefunden", "info" if not vuln_findings else "warn")
-            crit_vuln = [f for f in vuln_findings if f.severity == "CRITICAL"]
+            _log_scan_event(job_id, "nuclei", f"{len(report.findings_nuclei)} Vulnerabilities gefunden", "info")
+            crit_vuln = [f for f in report.findings_nuclei if f.severity == "CRITICAL"]
             if crit_vuln:
                 _log_scan_event(job_id, "nuclei", f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
 
@@ -346,8 +343,9 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             _log_scan_event(job_id, "ramparts", f"MCP-Analyse auf {len(set(mcp_phase_targets))} Kandidaten", "info")
             if config.run_ramparts:
                 pipeline._phase_mcp(report, list(set(mcp_phase_targets)))
-            mcp_findings = [f for f in report.all_findings if f.category == "mcp_exposure"]
-            _log_scan_event(job_id, "ramparts", f"{len(mcp_findings)} MCP-Findings", "info" if not mcp_findings else "error")
+            _mcp_pre_agg = [f for f in report.findings_ramparts + report.findings_naabu
+                            if f.category == "mcp_exposure"]
+            _log_scan_event(job_id, "ramparts", f"{len(_mcp_pre_agg)} MCP-Findings", "info" if not _mcp_pre_agg else "warn")
 
             _progress(95, "aggregating")
             pipeline._aggregate(report)
@@ -881,7 +879,7 @@ def _build_config(config_dict: dict):
         naabu_ports="top-1000", naabu_rate=2000, naabu_nmap=True,
         theharvester_full_sources=True, theharvester_limit=1000,
         httpx_screenshots=True, httpx_threads=100,
-        nuclei_tags="api,exposure,misconfig,default-login,mcp,cve",
+        nuclei_tags="api,exposure,misconfig,default-logins,mcp,tech,cve",
         nuclei_severity="info,low,medium,high,critical",
         nuclei_rate=150,
         ramparts_llm=False,

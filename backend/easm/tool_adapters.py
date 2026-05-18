@@ -754,10 +754,9 @@ class HTTPXAdapter:
                 "-web-server",           # Server-Header
                 "-cdn",                  # CDN-Erkennung
                 "-tls-probe",            # TLS-Info
-                "-hash", "sha256",       # Content-Hash für Änderungs-Detection
+                "-hash", "sha256",       # Content-Hash
                 "-favicon",              # Favicon-Hash
-                "-response-in-json",     # Body in JSON (limitiert)
-                "-include-response-header",
+                "-timeout", "10",        # Verbindungs-Timeout pro Host
             ]
 
             if take_screenshots and (shutil.which("chromium") or shutil.which("google-chrome")):
@@ -968,10 +967,15 @@ class NucleiAdapter:
             tf.write("\n".join(targets))
             target_file = tf.name
 
+        if log_fn:
+            preview = targets[:5]
+            log_fn("nuclei", f"{len(targets)} Targets | erste: {preview}", "info")
+
         try:
             # Standard-Templates wenn keine angegeben
+            # Correct nuclei v3 tag names: default-logins (not default-login)
             if not template_dirs and not tags:
-                tags = "api,exposure,misconfig,default-login,mcp"
+                tags = "api,exposure,misconfig,default-logins,mcp,tech"
 
             cmd = [
                 self.binary if _avail else "nuclei",
@@ -995,8 +999,12 @@ class NucleiAdapter:
             # Only disable update check if templates already exist locally
             _home = os.path.expanduser("~")
             _tmpl_dir = os.path.join(_home, "nuclei-templates")
-            if os.path.isdir(_tmpl_dir) and any(os.scandir(_tmpl_dir)):
+            _tmpl_has_content = os.path.isdir(_tmpl_dir) and any(os.scandir(_tmpl_dir))
+            if _tmpl_has_content:
                 cmd += ["-duc"]
+
+            if log_fn:
+                log_fn("nuclei", f"cmd: {' '.join(str(c) for c in cmd)}", "info")
 
             if not _avail:
                 if shutil.which("docker"):
@@ -1006,16 +1014,18 @@ class NucleiAdapter:
             rc, stdout, stderr = _run(cmd, timeout=900)
             findings = self._parse(tenant_id, stdout, stderr, rc)
             if log_fn:
-                stderr_short = (stderr or "").strip()[:300]
+                stderr_snippet = (stderr or "").strip()[:500]
                 stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
-                cmd_str = " ".join(str(c) for c in cmd[:12])
                 if rc != 0 and not stdout.strip():
-                    log_fn("nuclei", f"rc={rc} FEHLER — keine Ausgabe | stderr: {stderr_short}", "error")
-                    log_fn("nuclei", f"cmd: {cmd_str}", "warn")
+                    log_fn("nuclei", f"rc={rc} FEHLER — keine Ausgabe | stderr: {stderr_snippet}", "error")
                 elif rc != 0:
-                    log_fn("nuclei", f"rc={rc} (non-zero aber {stdout_lines} Findings-Zeilen) | stderr: {stderr_short[:100]}", "warn")
+                    log_fn("nuclei", f"rc={rc} | {stdout_lines} JSON-Zeilen → {len(findings)} Findings | stderr: {stderr_snippet[:200]}", "warn")
                 else:
                     log_fn("nuclei", f"rc=0 | {stdout_lines} JSON-Zeilen → {len(findings)} Findings geparst", "info")
+                    if stdout_lines > 0 and len(findings) == 0:
+                        # Parsing failed — log first raw line for debugging
+                        first_line = next((l for l in stdout.splitlines() if l.strip()), "")
+                        log_fn("nuclei", f"Parse-Fehler? Erste Ausgabezeile: {first_line[:300]}", "warn")
             return findings
 
         finally:
@@ -1265,7 +1275,12 @@ class NucleiAdapter:
                 cve_list = entry.get("info", {}).get("classification", {}).get("cve-id", [])
                 cve_id = cve_list[0] if cve_list else ""
                 cvss = entry.get("info", {}).get("classification", {}).get("cvss-score", 0.0)
-                tags_list = entry.get("info", {}).get("tags", [])
+                # nuclei v3: info.tags can be a comma-string OR a list depending on build
+                _tags_raw = entry.get("info", {}).get("tags", [])
+                if isinstance(_tags_raw, str):
+                    tags_list = [t.strip() for t in _tags_raw.split(",") if t.strip()]
+                else:
+                    tags_list = list(_tags_raw) if _tags_raw else []
 
                 is_mcp = any(t in ["mcp", "mcp-server", "model-context-protocol"]
                             for t in tags_list)
