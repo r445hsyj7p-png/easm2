@@ -240,21 +240,73 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         tenant_info = _get_tenant_info(tenant_id)
         config_dict = {**config_dict, **tenant_info}
 
+    def _progress(pct: int, phase: str = ""):
+        """Persist progress_pct so the frontend poll can show real progress."""
+        _update_scan_progress(job_id, pct, phase)
+
     try:
         # Status: Running
         _update_scan_status(job_id, "running", tenant_id)
+        _progress(0, "starting")
 
         # Plan-spezifische Konfiguration
         config = _build_config(config_dict)
 
-        # Pipeline ausführen
+        # Pipeline ausführen — mit Progress-Updates nach jeder Phase
         pipeline = EASMPipeline(tenant_id=tenant_id, config=config)
-        report = pipeline.run(
-            domain=config_dict.get("domain", ""),
-            ip_ranges=config_dict.get("ip_ranges", []),
-            panos_version=config_dict.get("panos_version", "")
-        )
 
+        import datetime as _dt
+        _start = _dt.datetime.utcnow()
+
+        def _run_with_progress():
+            domain    = config_dict.get("domain", "")
+            ip_ranges = config_dict.get("ip_ranges", [])
+            panos_ver = config_dict.get("panos_version", "")
+
+            from easm.pipeline import PipelineReport
+            report = PipelineReport(
+                tenant_id=tenant_id,
+                domain=domain,
+                ip_ranges=ip_ranges,
+                scan_start=_dt.datetime.utcnow().isoformat(),
+            )
+
+            _progress(5, "discovery")
+            subdomains = pipeline._phase_discovery(report, domain)
+
+            _progress(20, "portscan")
+            open_ports = pipeline._phase_portscan(report, list(set(
+                ip_ranges + [s.affected_asset for s in subdomains if "." in s.affected_asset]
+            )))
+            mcp_hosts = pipeline._identify_mcp_hosts(report)
+
+            _progress(35, "tls")
+            tls_targets = pipeline._build_tls_targets(open_ports, subdomains)
+            pipeline._phase_tls(report, tls_targets)
+
+            _progress(50, "http")
+            http_targets = pipeline._build_http_targets(open_ports, subdomains)
+            pipeline._phase_http(report, http_targets)
+
+            _progress(70, "vuln")
+            pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), mcp_hosts)
+
+            _progress(88, "mcp")
+            if mcp_hosts and config.run_ramparts:
+                pipeline._phase_mcp(report, mcp_hosts)
+
+            _progress(95, "aggregating")
+            pipeline._aggregate(report)
+
+            end_ts = _dt.datetime.utcnow()
+            report.scan_end = end_ts.isoformat()
+            report.duration_seconds = int((end_ts - _dt.datetime.fromisoformat(report.scan_start)).total_seconds())
+            pipeline._print_summary(report)
+            return report
+
+        report = _run_with_progress()
+
+        _progress(99, "saving")
         # Ergebnisse in DB speichern
         _save_report(tenant_id, job_id, report)
 
@@ -830,6 +882,27 @@ def _update_scan_status(job_id: str, status: str,
         logger.info(f"[{job_id[:8]}] Status → {status}")
     except Exception as exc:
         logger.error(f"_update_scan_status DB-Fehler: {exc}")
+
+
+def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
+    """Updates progress_pct in raw_results so the frontend poll sees real progress."""
+    import psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE scan_jobs
+                SET raw_results = COALESCE(raw_results, '{}'::jsonb)
+                    || jsonb_build_object('progress_pct', %s, 'current_phase', %s)
+                WHERE id = %s
+            """, (pct, phase, job_id))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning(f"_update_scan_progress failed: {exc}")
 
 
 def _save_report(tenant_id: str, job_id: str, report):

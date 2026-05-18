@@ -1,25 +1,26 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { Play, Loader2, CheckCircle, XCircle, Circle } from "lucide-react";
+import { Play, Loader2, CheckCircle, XCircle, Circle, AlertTriangle } from "lucide-react";
 import { T, TOOL_COLOR } from "../../theme";
 import { useApp } from "../../context/AppContext";
+import { apiFetch } from "../../api/client";
 
 const ScanTimeline = ({ scans }) => (
   <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
     {scans.map((s,i) => (
       <div key={s.id || i} style={{ display:"flex", gap:10, position:"relative" }}>
         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:16 }}>
-          {s.status==="completed" ? <CheckCircle size={12} color={T.accent} style={{ flexShrink:0, marginTop:2 }} /> :
-           s.status==="running"   ? <Loader2    size={12} color={T.accent} style={{ flexShrink:0, marginTop:2, animation:"spin 1s linear infinite" }} /> :
-           s.status==="error"     ? <XCircle    size={12} color={T.critical} style={{ flexShrink:0, marginTop:2 }} /> :
-                                    <Circle     size={12} color={T.text3}  style={{ flexShrink:0, marginTop:2 }} />}
+          {s.status==="completed" ? <CheckCircle size={12} color={T.accent}    style={{ flexShrink:0, marginTop:2 }} /> :
+           s.status==="running"   ? <Loader2    size={12} color={T.accent}    style={{ flexShrink:0, marginTop:2, animation:"spin 1s linear infinite" }} /> :
+           s.status==="error"     ? <XCircle    size={12} color={T.critical}  style={{ flexShrink:0, marginTop:2 }} /> :
+                                    <Circle     size={12} color={T.text3}     style={{ flexShrink:0, marginTop:2 }} />}
           {i < scans.length-1 && <div style={{ width:1, flex:1, background:T.border, marginTop:2 }}/>}
         </div>
         <div style={{ flex:1, paddingBottom:14 }}>
           <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:4 }}>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, color:T.text0, fontWeight:600 }}>{s.label}</span>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
-              color: s.status==="completed" ? T.accent : T.text3 }}>
+              color: s.status==="completed" ? T.accent : s.status==="error" ? T.critical : T.text3 }}>
               {s.status}
             </span>
             <span style={{ marginLeft:"auto", fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>{s.time}</span>
@@ -38,13 +39,18 @@ const ScanTimeline = ({ scans }) => (
 );
 
 const ALL_PHASES = [
-  { key:"discovery", label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent,       secs:40 },
-  { key:"portscan",  label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium,       secs:28 },
-  { key:"tls",       label:"TLS Scan",     tool:"sslyze — cipher + cert",   color:T.toolSslyze,   secs:22 },
-  { key:"http",      label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx,    secs:34 },
-  { key:"vuln",      label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical,     secs:67 },
-  { key:"mcp",       label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,         secs:12 },
+  { key:"discovery", label:"Discovery",    tool:"subfinder + theHarvester", color:T.accent,     pct:[0,20]  },
+  { key:"portscan",  label:"Port Scan",    tool:"naabu SYN-Scan + UDP",     color:T.medium,     pct:[20,35] },
+  { key:"tls",       label:"TLS Scan",     tool:"sslyze — cipher + cert",   color:T.toolSslyze, pct:[35,50] },
+  { key:"http",      label:"HTTP Probing", tool:"httpx + screenshots",      color:T.toolHttpx,  pct:[50,70] },
+  { key:"vuln",      label:"Vuln Scan",    tool:"nuclei 7000+ templates",   color:T.critical,   pct:[70,88] },
+  { key:"mcp",       label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,       pct:[88,99] },
 ];
+
+// Map backend phase name → index
+const PHASE_NAME_TO_IDX = {
+  starting:0, discovery:0, portscan:1, tls:2, http:3, vuln:4, mcp:5, aggregating:5, saving:5,
+};
 
 const SCAN_LOG = [
   { t:"subfinder",    msg:"loading passive sources: VirusTotal, Shodan, Censys, SecurityTrails, DNSdumpster...", c:"cyan",   phase:"discovery" },
@@ -77,11 +83,25 @@ const SCAN_LOG = [
 ];
 
 const COLORS = { cyan:T.accent, green:T.accent, yellow:T.medium, red:T.critical, purple:T.toolHttpx, orange:T.high, dim:T.text3 };
-
 const DEFAULT_SELECTED = { discovery:true, portscan:true, tls:true, http:true, vuln:true, mcp:true };
 
+// Elapsed-time counter that ticks every second while a scan is active
+function useElapsed(startedAt) {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    if (!startedAt) { setSecs(0); return; }
+    const base = new Date(startedAt).getTime();
+    const tick = () => setSecs(Math.floor((Date.now() - base) / 1000));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  return secs;
+}
+
 const ScansTab = () => {
-  const { tenant, triggerScan, scans } = useApp();
+  const { tenant, triggerScan, scans, tenantId, refresh } = useApp();
+
   const mappedScans = (Array.isArray(scans) ? scans : []).slice(0, 10).map(s => ({
     id: s.id,
     label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace(/_/g, " ")} Scan`,
@@ -89,23 +109,40 @@ const ScansTab = () => {
     time: s.duration_seconds ? `${s.duration_seconds}s` : "—",
     tags: [
       s.findings_count != null ? `${s.findings_count} findings` : null,
-      s.risk_score != null ? `score: ${s.risk_score}` : null,
+      s.risk_score     != null ? `score: ${s.risk_score}`       : null,
     ].filter(Boolean),
   }));
 
-  const [selected, setSelected] = useState(DEFAULT_SELECTED);
-  const [running,  setRunning]  = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [phase,    setPhase]    = useState(-1);
-  const [logs,     setLogs]     = useState([]);
-  const logRef   = useRef(null);
-  const intervalRef = useRef(null);
+  const [selected,      setSelected]      = useState(DEFAULT_SELECTED);
+  const [logs,          setLogs]          = useState([]);
+
+  // Real scan tracking
+  const [scanId,        setScanId]        = useState(null);
+  const [scanStatus,    setScanStatus]    = useState(null); // full poll response
+  const [scanStartedAt, setScanStartedAt] = useState(null);
+
+  // Cosmetic animation (log drip only — progress driven by real data)
+  const [cosmeticPhase, setCosmeticPhase] = useState(-1);
+  const cosmeticRef = useRef(null);
+  const pollRef     = useRef(null);
+  const logRef      = useRef(null);
+
+  const elapsed = useElapsed(scanStartedAt);
+
+  // Derived display values
+  const realPct    = scanStatus?.progress_pct ?? 0;
+  const realPhase  = PHASE_NAME_TO_IDX[scanStatus?.current_phase] ?? -1;
+  const displayPct = realPct;
+  const displayPhaseIdx = cosmeticPhase >= 0 ? cosmeticPhase : realPhase;
+
+  const isActive   = scanStatus?.status === "running" || scanStatus?.status === "pending";
+  const isDone     = scanStatus?.status === "completed";
+  const isError    = scanStatus?.status === "error";
 
   const activePhases = ALL_PHASES.filter(ph => selected[ph.key]);
-  const activeLogs   = SCAN_LOG.filter(l => selected[l.phase]);
 
   const togglePhase = (key) => {
-    if (running) return;
+    if (isActive) return;
     setSelected(prev => {
       const next = { ...prev, [key]: !prev[key] };
       if (Object.values(next).every(v => !v)) return prev;
@@ -113,57 +150,124 @@ const ScansTab = () => {
     });
   };
 
-  const startScan = () => {
-    if (activePhases.length === 0 || running) return;
+  // Poll scan status
+  const startPolling = useCallback((id) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    const poll = async () => {
+      try {
+        const data = await apiFetch(`/tenants/${tenantId}/scans/${id}`);
+        setScanStatus(data);
+        if (data.started_at) setScanStartedAt(data.started_at);
+
+        if (data.status === "completed") {
+          clearInterval(pollRef.current); pollRef.current = null;
+          if (cosmeticRef.current) { clearInterval(cosmeticRef.current); cosmeticRef.current = null; }
+          setCosmeticPhase(-1);
+          const cnt   = data.findings_count ?? "—";
+          const score = data.risk_score     ?? "—";
+          const dur   = data.duration_seconds ? `${data.duration_seconds}s` : "";
+          toast.success(`Scan abgeschlossen ${dur ? `(${dur})` : ""}`, {
+            description: `${cnt} Findings · Risk Score: ${score}`,
+            duration: 10000,
+          });
+          refresh();
+        } else if (data.status === "error") {
+          clearInterval(pollRef.current); pollRef.current = null;
+          if (cosmeticRef.current) { clearInterval(cosmeticRef.current); cosmeticRef.current = null; }
+          setCosmeticPhase(-1);
+          toast.error("Scan fehlgeschlagen", { description: data.error_message || "Unbekannter Fehler" });
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    };
+
+    poll();
+    pollRef.current = setInterval(poll, 5000);
+  }, [tenantId, refresh]);
+
+  // Cosmetic log drip — independent of real progress
+  const startCosmeticLog = useCallback((sel) => {
+    const snapLogs = SCAN_LOG.filter(l => sel[l.phase]);
+    const n = ALL_PHASES.filter(ph => sel[ph.key]).length;
+    let p = 0, logI = 0;
+    if (cosmeticRef.current) clearInterval(cosmeticRef.current);
+    cosmeticRef.current = setInterval(() => {
+      p = Math.min(p + (5.4 / Math.max(n, 1)), 100);
+      setCosmeticPhase(Math.min(Math.floor(p * n / 100), n - 1));
+      if (snapLogs.length > 0) {
+        const threshold = (logI / snapLogs.length) * 100;
+        if (p >= threshold && logI < snapLogs.length) {
+          const entry = snapLogs[logI]; logI++;
+          if (entry) setLogs(l => [...l, entry]);
+        }
+      }
+      if (p >= 100) {
+        clearInterval(cosmeticRef.current); cosmeticRef.current = null;
+        setCosmeticPhase(-1);
+      }
+    }, 90);
+  }, []);
+
+  const startScan = async () => {
+    if (isActive || activePhases.length === 0) return;
 
     const scanType = activePhases.length === ALL_PHASES.length
       ? "full"
       : activePhases.map(p => p.key).join(",");
 
-    // Fire-and-forget: dispatch API call in background, never block animation
-    triggerScan(scanType)
-      .then(() => toast.info("Scan dispatched", { description: "Pipeline läuft im Hintergrund." }))
-      .catch(e => toast.error("Scan-Dispatch fehlgeschlagen", { description: e.message }));
+    // Optimistic UI
+    setScanStatus({ status: "pending", progress_pct: 0, current_phase: "starting" });
+    setScanStartedAt(new Date().toISOString());
+    setLogs([]);
+    setScanId(null);
 
-    setRunning(true); setProgress(0); setPhase(0); setLogs([]);
+    // Start cosmetic log animation
+    startCosmeticLog(selected);
 
-    // Capture locals for the interval closure
-    const snapLogs  = SCAN_LOG.filter(l => selected[l.phase]);
-    const n         = activePhases.length;
-    let p = 0, logI = 0;
-
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = setInterval(() => {
-      p = Math.min(p + (5.4 / Math.max(n, 1)), 100);
-      setPhase(Math.min(Math.floor(p * n / 100), n - 1));
-      if (snapLogs.length > 0) {
-        const threshold = (logI / snapLogs.length) * 100;
-        if (p >= threshold && logI < snapLogs.length) {
-          setLogs(l => [...l, snapLogs[logI]]);
-          logI++;
-        }
-      }
-      setProgress(p);
-      if (p >= 100) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-        setRunning(false);
-        setPhase(-1);
-        toast.success("Animation abgeschlossen", { description: "Scan läuft im Hintergrund — Ergebnisse erscheinen nach Abschluss." });
-      }
-    }, 90);
+    try {
+      const job = await triggerScan(scanType);
+      setScanId(job.id);
+      toast.info("Scan gestartet", { description: "Status wird alle 5s aktualisiert." });
+      startPolling(job.id);
+    } catch (e) {
+      toast.error("Scan-Dispatch fehlgeschlagen", { description: e.message });
+      if (cosmeticRef.current) { clearInterval(cosmeticRef.current); cosmeticRef.current = null; }
+      setScanStatus(null);
+      setScanStartedAt(null);
+    }
   };
 
-  useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
+  useEffect(() => () => {
+    clearInterval(cosmeticRef.current);
+    clearInterval(pollRef.current);
+  }, []);
+
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
+
+  // Status-bar text
+  const statusText = () => {
+    if (isDone)  return `✓ Abgeschlossen · ${scanStatus?.findings_count ?? "—"} Findings · Score: ${scanStatus?.risk_score ?? "—"}`;
+    if (isError) return `✗ Fehler: ${scanStatus?.error_message || "Unbekannt"}`;
+    if (isActive) {
+      const phaseName = scanStatus?.current_phase || "";
+      const ph = activePhases[displayPhaseIdx];
+      return phaseName ? `[${phaseName}] ${ph?.tool ?? ""}` : (ph?.tool ?? "");
+    }
+    return `${activePhases.length} von ${ALL_PHASES.length} Modulen ausgewählt`;
+  };
+
+  // Progress bar color
+  const barColor = isError ? T.critical : isDone ? T.accent : T.accent;
 
   return (
     <div style={{ display:"grid", gridTemplateColumns:"1fr 360px", gap:16, alignItems:"flex-start" }}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
 
-        {/* Tool selection */}
+        {/* Module selection */}
         <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:6, padding:16 }}>
           <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3,
             letterSpacing:"0.08em", marginBottom:12 }}>SCAN MODULES — AUSWAHL</div>
@@ -171,17 +275,16 @@ const ScansTab = () => {
             {ALL_PHASES.map(ph => {
               const on = selected[ph.key];
               return (
-                <button key={ph.key} onClick={() => togglePhase(ph.key)} disabled={running} style={{
+                <button key={ph.key} onClick={() => togglePhase(ph.key)} disabled={isActive} style={{
                   display:"flex", alignItems:"center", gap:6,
                   background: on ? `${ph.color}15` : T.bg3,
                   border:`1px solid ${on ? ph.color : T.border}`,
                   borderRadius:4, padding:"6px 12px",
-                  cursor: running ? "not-allowed" : "pointer",
-                  opacity: running ? 0.7 : 1,
+                  cursor: isActive ? "not-allowed" : "pointer",
+                  opacity: isActive ? 0.7 : 1,
                   transition:"all 0.15s",
                 }}>
-                  <div style={{ width:6, height:6, borderRadius:"50%",
-                    background: on ? ph.color : T.text3, flexShrink:0 }}/>
+                  <div style={{ width:6, height:6, borderRadius:"50%", background: on ? ph.color : T.text3, flexShrink:0 }}/>
                   <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
                     color: on ? ph.color : T.text3, fontWeight: on ? 700 : 400 }}>{ph.label}</span>
                 </button>
@@ -199,49 +302,55 @@ const ScansTab = () => {
                 {tenant?.domain || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
               </div>
             </div>
-            <button onClick={startScan} disabled={running || activePhases.length === 0} style={{
-              background: running ? T.bg3 : T.accent,
-              border:"none", borderRadius:4, padding:"9px 24px",
-              fontFamily:"'JetBrains Mono',monospace", fontSize:11, fontWeight:700,
-              color: running ? T.text2 : T.bg0,
-              cursor: (running || activePhases.length === 0) ? "not-allowed" : "pointer",
-              letterSpacing:"0.06em",
-              display:"flex", alignItems:"center", gap:7,
-            }}>
-              {running
-                ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }} />{`SCANNING… ${Math.round(progress)}%`}</>
-                : <><Play size={13} />START SCAN</>}
-            </button>
+            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+              {isActive && (
+                <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:10, color:T.text2 }}>
+                  {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2,"0")} elapsed
+                </span>
+              )}
+              <button onClick={startScan} disabled={isActive || activePhases.length === 0} style={{
+                background: isActive ? T.bg3 : T.accent,
+                border:"none", borderRadius:4, padding:"9px 24px",
+                fontFamily:"'JetBrains Mono',monospace", fontSize:11, fontWeight:700,
+                color: isActive ? T.text2 : T.bg0,
+                cursor: (isActive || activePhases.length === 0) ? "not-allowed" : "pointer",
+                letterSpacing:"0.06em",
+                display:"flex", alignItems:"center", gap:7,
+              }}>
+                {isActive
+                  ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }} />SCANNING… {displayPct}%</>
+                  : <><Play size={13} />START SCAN</>}
+              </button>
+            </div>
           </div>
 
-          {/* Progress bar */}
+          {/* Progress bar — driven by real backend progress_pct */}
           <div style={{ height:3, background:T.bg4, borderRadius:2, overflow:"hidden", marginBottom:8 }}>
-            <div style={{ height:"100%", background:T.accent, borderRadius:2,
-              width:`${progress}%`, transition:"width 0.15s" }}/>
+            <div style={{ height:"100%", background: barColor, borderRadius:2,
+              width:`${isDone ? 100 : displayPct}%`, transition:"width 0.6s ease" }}/>
           </div>
           <div style={{ display:"flex", justifyContent:"space-between", marginBottom:16 }}>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>
-              {running
-                ? (activePhases[phase]?.tool ?? "")
-                : progress >= 100
-                  ? "✓ Scan gestartet — läuft im Hintergrund"
-                  : `${activePhases.length} von ${ALL_PHASES.length} Modulen ausgewählt`}
+            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9,
+              color: isError ? T.critical : T.text3, maxWidth:"80%" }}>
+              {statusText()}
             </span>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.accent }}>{Math.round(progress)}%</span>
+            <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color: isDone ? T.accent : T.accent }}>
+              {isDone ? "100%" : `${displayPct}%`}
+            </span>
           </div>
 
-          {/* Phase cards — only selected phases */}
+          {/* Phase cards */}
           <div style={{ display:"flex", gap:6 }}>
             {activePhases.map((ph, i) => {
-              const done   = progress >= (i + 1) * (100 / activePhases.length);
-              const active = running && phase === i;
+              const done   = isDone || (displayPct >= ph.pct[1]);
+              const active = isActive && displayPhaseIdx === i;
               return (
                 <div key={ph.key} style={{
                   flex:1, padding:"10px 10px 9px",
                   background: done ? `${ph.color}10` : T.bg3,
                   border:`1px solid ${active ? ph.color : done ? `${ph.color}35` : T.border}`,
                   borderTop:`2px solid ${active || done ? ph.color : T.border}`,
-                  borderRadius:4, transition:"all 0.3s",
+                  borderRadius:4, transition:"all 0.4s",
                 }}>
                   <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:7,
                     color:ph.color, letterSpacing:"0.08em", marginBottom:4 }}>P{i+1}</div>
@@ -251,39 +360,69 @@ const ScansTab = () => {
                   <div style={{ marginTop:5, display:"flex", alignItems:"center", gap:4,
                     fontFamily:"'JetBrains Mono',monospace", fontSize:9,
                     color: done ? T.accent : active ? T.accent : T.text3 }}>
-                    {done   ? <><CheckCircle size={9} />{ph.secs}s</> :
+                    {done   ? <><CheckCircle size={9} />done</> :
                      active ? <><Loader2 size={9} style={{ animation:"spin 1s linear infinite" }} />running…</> :
-                     `~${ph.secs}s`}
+                     "pending"}
                   </div>
                 </div>
               );
             })}
           </div>
+
+          {/* Final stats bar when done */}
+          {isDone && scanStatus && (
+            <div style={{ marginTop:12, display:"flex", gap:16, padding:"10px 14px",
+              background:T.bg3, border:`1px solid ${T.accent}22`, borderRadius:4 }}>
+              {[
+                ["findings",      scanStatus.findings_count ?? "—"],
+                ["risk score",    scanStatus.risk_score     ?? "—"],
+                ["duration",      scanStatus.duration_seconds ? `${scanStatus.duration_seconds}s` : "—"],
+              ].map(([label, val]) => (
+                <div key={label}>
+                  <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:8, color:T.text3, marginBottom:2 }}>{label.toUpperCase()}</div>
+                  <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:13, fontWeight:700, color:T.accent }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Error details */}
+          {isError && (
+            <div style={{ marginTop:12, display:"flex", alignItems:"center", gap:8, padding:"10px 14px",
+              background:`${T.critical}10`, border:`1px solid ${T.critical}30`, borderRadius:4 }}>
+              <AlertTriangle size={14} color={T.critical} />
+              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:10, color:T.critical }}>
+                {scanStatus?.error_message || "Scan fehlgeschlagen"}
+              </span>
+            </div>
+          )}
         </div>
 
-        {/* Live log */}
+        {/* Live log — cosmetic drip, labeled as such */}
         <div style={{ background:T.bg0, border:`1px solid ${T.border}`, borderRadius:6, overflow:"hidden" }}>
           <div style={{ padding:"8px 16px", borderBottom:`1px solid ${T.border}`, background:T.bg2,
             display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <div style={{ display:"flex", gap:6 }}>
+            <div style={{ display:"flex", gap:6, alignItems:"center" }}>
               {["#ff5f56","#ffbd2e","#27c93f"].map((c,i) => (
                 <div key={i} style={{ width:10, height:10, borderRadius:"50%", background:c, opacity:0.8 }}/>
               ))}
-              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginLeft:6, letterSpacing:"0.08em" }}>SCAN LOG — LIVE OUTPUT</span>
+              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginLeft:6, letterSpacing:"0.08em" }}>
+                SCAN LOG — SIMULIERTER OUTPUT
+              </span>
             </div>
             <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3 }}>{logs.length} lines</span>
           </div>
           <div ref={logRef} style={{ padding:"14px 18px", fontFamily:"'JetBrains Mono',monospace",
             fontSize:11, lineHeight:1.9, minHeight:240, maxHeight:340, overflowY:"auto" }}>
             {logs.length === 0 ? (
-              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.slug || "—"} --modules {activePhases.map(p => p.key).join(",")}</span>
-            ) : logs.map((line, i) => (
+              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.domain || "—"} --modules {activePhases.map(p => p.key).join(",")}</span>
+            ) : logs.filter(Boolean).map((line, i) => (
               <div key={i} style={{ color: COLORS[line.c] || T.text2 }}>
                 <span style={{ color:T.text3, userSelect:"none" }}>[{String(i+1).padStart(2,"0")}] </span>
                 <span style={{ color:T.border2 }}>[{line.t}]</span>
                 {"  ".slice(0, Math.max(2, 14-line.t.length))}
                 <span>{line.msg}</span>
-                {i === logs.length-1 && running && <span style={{ animation:"pulse 0.7s infinite" }}> ▮</span>}
+                {i === logs.length-1 && isActive && <span style={{ animation:"pulse 0.7s infinite" }}> ▮</span>}
               </div>
             ))}
           </div>

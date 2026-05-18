@@ -582,7 +582,8 @@ async def get_scan(
                risk_score_after AS risk_score,
                created_at AS started_at, completed_at AS finished_at,
                duration_seconds, error_message,
-               COALESCE((raw_results->>'progress_pct')::int, 0) AS progress_pct
+               COALESCE((raw_results->>'progress_pct')::int, 0) AS progress_pct,
+               COALESCE(raw_results->>'current_phase', '') AS current_phase
         FROM scan_jobs
         WHERE id = :sid AND tenant_id = :tid
     """), {"sid": scan_id, "tid": tenant_id})
