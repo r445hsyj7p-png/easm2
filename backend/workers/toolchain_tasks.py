@@ -287,13 +287,25 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
 
             _progress(50, "http")
             http_targets = pipeline._build_http_targets(open_ports, subdomains)
+            # Always include the root domain so nuclei has at least one target
+            if domain:
+                for _scheme in ("https", "http"):
+                    _root = f"{_scheme}://{domain}"
+                    if _root not in http_targets:
+                        http_targets.append(_root)
             pipeline._phase_http(report, http_targets)
 
             _progress(70, "vuln")
             pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), mcp_hosts)
 
             _progress(88, "mcp")
-            if mcp_hosts and config.run_ramparts:
+            # Always check domain's common MCP ports even without port scan hits
+            if domain and not mcp_hosts:
+                for _port in (3000, 8080, 8000, 6274, 6277):
+                    mcp_hosts.append(f"http://{domain}:{_port}")
+                    mcp_hosts.append(f"https://{domain}:{_port}")
+                mcp_hosts = list(set(mcp_hosts))
+            if config.run_ramparts:
                 pipeline._phase_mcp(report, mcp_hosts)
 
             _progress(95, "aggregating")
@@ -906,6 +918,92 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
         logger.warning(f"_update_scan_progress failed: {exc}")
 
 
+def _resolve_assets(fqdns: list, hosts: list) -> tuple:
+    """
+    Resolves IPs for FQDNs and looks up org/ASN via RIPE RDAP for unique IPs.
+    Returns (ip_map, rdap_map) where:
+      ip_map:   {fqdn_or_host -> ip_str or None}
+      rdap_map: {ip_str -> (org_str, asn_int)}
+    """
+    import socket as _sock
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+    import urllib.request as _ur
+    import json as _j
+
+    all_targets = list(set(fqdns + hosts))
+
+    def _resolve(target):
+        # Already an IP?
+        try:
+            _sock.inet_aton(target)
+            return target, target
+        except OSError:
+            pass
+        try:
+            return target, _sock.gethostbyname(target)
+        except Exception:
+            return target, None
+
+    ip_map: dict = {}
+    try:
+        with _TPE(max_workers=30) as ex:
+            futs = {ex.submit(_resolve, t): t for t in all_targets}
+            for fut in _ac(futs, timeout=25):
+                try:
+                    fqdn, ip = fut.result()
+                    ip_map[fqdn] = ip
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    unique_ips = list(set(v for v in ip_map.values() if v))
+
+    def _rdap(ip):
+        # RIPE NCC stat API — free, no key required
+        try:
+            with _ur.urlopen(
+                f"https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
+                timeout=5,
+            ) as r:
+                data = _j.loads(r.read())
+                asns = data.get("data", {}).get("asns", [])
+                if asns:
+                    org = (asns[0].get("holder") or "").strip()
+                    asn = int(asns[0].get("asn", 0) or 0)
+                    if org:
+                        return ip, (org, asn)
+        except Exception:
+            pass
+        # ARIN RDAP fallback
+        try:
+            with _ur.urlopen(
+                f"https://rdap.arin.net/registry/ip/{ip}",
+                timeout=5,
+            ) as r:
+                data = _j.loads(r.read())
+                org = (data.get("name") or "").strip()
+                return ip, (org, 0)
+        except Exception:
+            pass
+        return ip, ("", 0)
+
+    rdap_map: dict = {}
+    try:
+        with _TPE(max_workers=10) as ex:
+            futs = {ex.submit(_rdap, ip): ip for ip in unique_ips[:40]}
+            for fut in _ac(futs, timeout=80):
+                try:
+                    ip, (org, asn) = fut.result()
+                    rdap_map[ip] = (org, asn)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return ip_map, rdap_map
+
+
 def _save_report(tenant_id: str, job_id: str, report):
     """Speichert Findings, Assets, MCP-Server und Score in DB."""
     import psycopg2, psycopg2.extras, hashlib as _hl
@@ -954,12 +1052,20 @@ def _save_report(tenant_id: str, job_id: str, report):
                 ))
                 saved_findings += 1
 
+            # ── Resolve IPs + org/ASN for discovered assets ───────────
+            _ip_map, _rdap_map = _resolve_assets(
+                list(report.subdomains_discovered),
+                list(report.open_ports.keys()),
+            )
+
             # ── Assets (Subdomains + IPs) ──────────────────────────────
             seen_assets = set()
             for fqdn in report.subdomains_discovered:
                 if fqdn in seen_assets:
                     continue
                 seen_assets.add(fqdn)
+                _ip  = _ip_map.get(fqdn)
+                _org, _asn = _rdap_map.get(_ip, ("", 0)) if _ip else ("", 0)
                 cur.execute("""
                     INSERT INTO assets
                         (id, tenant_id, fqdn, ip, org, asn,
@@ -967,16 +1073,18 @@ def _save_report(tenant_id: str, job_id: str, report):
                          first_seen, last_seen)
                     VALUES
                         (gen_random_uuid()::text, %s, %s,
-                         NULL, NULL, NULL,
+                         %s::inet, %s, %s,
                          '{}', 'LOW', ARRAY['subfinder'], FALSE, '[]',
                          NOW(), NOW())
                     ON CONFLICT DO NOTHING
-                """, (tenant_id, fqdn))
+                """, (tenant_id, fqdn, _ip, _org or None, _asn or None))
                 saved_assets += 1
 
             for host, ports in report.open_ports.items():
                 port_list = [int(p) for p in ports
                              if isinstance(p, int) or (isinstance(p, str) and p.isdigit())]
+                _ip  = _ip_map.get(host, host)
+                _org, _asn = _rdap_map.get(_ip, ("", 0)) if _ip else ("", 0)
                 cur.execute("""
                     INSERT INTO assets
                         (id, tenant_id, fqdn, ip, org, asn,
@@ -984,11 +1092,11 @@ def _save_report(tenant_id: str, job_id: str, report):
                          first_seen, last_seen)
                     VALUES
                         (gen_random_uuid()::text, %s, %s,
-                         NULL, NULL, NULL,
+                         %s::inet, %s, %s,
                          %s::integer[], 'MEDIUM', ARRAY['naabu'], FALSE, '[]',
                          NOW(), NOW())
                     ON CONFLICT DO NOTHING
-                """, (tenant_id, host, port_list))
+                """, (tenant_id, host, _ip, _org or None, _asn or None, port_list))
                 saved_assets += 1
 
             # ── MCP Servers ────────────────────────────────────────────
@@ -1028,44 +1136,54 @@ def _save_report(tenant_id: str, job_id: str, report):
             ))
 
             # ── Intel Snapshot (Hosting Analysis + FQDN Inventory) ────
-            cur.execute("""
-                SELECT fqdn, ip::text, org, asn, risk
-                FROM assets WHERE tenant_id = %s
-                ORDER BY risk, fqdn NULLS LAST
-            """, (tenant_id,))
-            asset_rows = cur.fetchall()
+            # Build from live resolved data (not from DB, which may have NULLs)
+            _sev_ord = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+            _fqdn_risk: dict = {}
+            for _f in report.all_findings:
+                _asset = _f.affected_asset or ""
+                for _sub in report.subdomains_discovered:
+                    if _sub in _asset:
+                        if _sev_ord.get(_f.severity, 0) > _sev_ord.get(_fqdn_risk.get(_sub, "LOW"), 0):
+                            _fqdn_risk[_sub] = _f.severity
 
-            # FQDN table
             fqdn_table = [
                 {
-                    "fqdn":    r[0] or "—",
-                    "ip":      r[1] or "—",
-                    "org":     r[2] or "—",
-                    "asn":     r[3] or 0,
+                    "fqdn":     fqdn,
+                    "ip":       (_ip_map.get(fqdn) or "—"),
+                    "org":      (_rdap_map.get(_ip_map.get(fqdn), ("", 0))[0] or "—"),
+                    "asn":      (_rdap_map.get(_ip_map.get(fqdn), ("", 0))[1] or 0),
                     "netblock": "—",
-                    "country": "—",
-                    "risk":    r[4] or "LOW",
+                    "country":  "—",
+                    "risk":     _fqdn_risk.get(fqdn, "LOW"),
                 }
-                for r in asset_rows if r[0] or r[1]
+                for fqdn in report.subdomains_discovered
             ]
 
-            # Hosting orgs aggregation
-            from collections import Counter as _Counter
-            org_counts = _Counter(
-                r[2] for r in asset_rows if r[2]
-            )
-            total_assets = len(asset_rows) or 1
+            # Hosting orgs: count per org across all resolved IPs
+            _org_cnt: dict = {}
+            for _target in list(report.subdomains_discovered) + list(report.open_ports.keys()):
+                _ip = _ip_map.get(_target)
+                if not _ip:
+                    continue
+                _org, _asn2 = _rdap_map.get(_ip, ("", 0))
+                if _org:
+                    prev = _org_cnt.get(_org, (0, _asn2))
+                    _org_cnt[_org] = (prev[0] + 1, _asn2)
+
+            _total_h = sum(v[0] for v in _org_cnt.values()) or 1
             _palette = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6",
                         "#06b6d4", "#f97316", "#a855f7", "#14b8a6", "#ef4444"]
             hosting_orgs = [
                 {
-                    "name":  org,
-                    "count": cnt,
-                    "pct":   round(cnt / total_assets * 100, 1),
-                    "asn":   0,
-                    "color": _palette[i % len(_palette)],
+                    "name":  _org,
+                    "count": _cnt,
+                    "pct":   round(_cnt / _total_h * 100, 1),
+                    "asn":   _asn2,
+                    "color": _palette[_i % len(_palette)],
                 }
-                for i, (org, cnt) in enumerate(org_counts.most_common(10))
+                for _i, (_org, (_cnt, _asn2)) in enumerate(
+                    sorted(_org_cnt.items(), key=lambda x: -x[1][0])[:10]
+                )
             ]
 
             intel_data = {
