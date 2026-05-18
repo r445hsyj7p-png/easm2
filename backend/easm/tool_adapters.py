@@ -1031,7 +1031,7 @@ class NucleiAdapter:
                     cvss_score=float(cvss) if cvss else 0.0,
                     raw_data=entry,
                 ))
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 pass
         return findings
 

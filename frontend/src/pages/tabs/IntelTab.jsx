@@ -27,14 +27,14 @@ const IntelTab = () => {
       (fqdnSev==="ALL"||r.risk===fqdnSev)&&
       (fqdnOrg===null||r.org===fqdnOrg)&&
       (!fqdnSearch||r.fqdn.includes(fqdnSearch)||r.ip.includes(fqdnSearch)||
-        r.org.toLowerCase().includes(fqdnSearch.toLowerCase())||String(r.asn).includes(fqdnSearch))
+        (r.org||"").toLowerCase().includes(fqdnSearch.toLowerCase())||String(r.asn).includes(fqdnSearch))
     )
     .sort((a,b)=>{
       let c=0;
       if(fqdnSort.col==="risk") c=(SEV_ORD[a.risk]||4)-(SEV_ORD[b.risk]||4);
-      else if(fqdnSort.col==="fqdn") c=a.fqdn.localeCompare(b.fqdn);
-      else if(fqdnSort.col==="asn") c=a.asn-b.asn;
-      else if(fqdnSort.col==="org") c=a.org.localeCompare(b.org);
+      else if(fqdnSort.col==="fqdn") c=(a.fqdn||"").localeCompare(b.fqdn||"");
+      else if(fqdnSort.col==="asn") c=(a.asn||0)-(b.asn||0);
+      else if(fqdnSort.col==="org") c=(a.org||"").localeCompare(b.org||"");
       return fqdnSort.dir==="asc"?c:-c;
     });
 

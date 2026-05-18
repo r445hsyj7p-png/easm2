@@ -77,6 +77,12 @@ async def upsert_tenant_score(db: AsyncSession, tenant_id: str):
     await db.execute(text("""
         INSERT INTO tenant_scores (id, tenant_id, score, grade, findings_summary, asset_counts)
         VALUES (gen_random_uuid()::text, :tid, :score, :grade, :fs::jsonb, :ac::jsonb)
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            score            = EXCLUDED.score,
+            grade            = EXCLUDED.grade,
+            findings_summary = EXCLUDED.findings_summary,
+            asset_counts     = EXCLUDED.asset_counts,
+            recorded_at      = NOW()
     """), {
         "tid": tenant_id, "score": score, "grade": grade,
         "fs": json.dumps(summary), "ac": json.dumps(ac),
