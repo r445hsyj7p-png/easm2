@@ -67,7 +67,7 @@ celery_app.conf.update(
         # ── Plan-basierte vollständige Scans ──────────────────────────
         "scan-all-daily": {
             "task": "workers.toolchain_tasks.schedule_tenants",
-            "schedule": crontab(minute=0),
+            "schedule": crontab(hour=3, minute=0),
             "args": ["all"],
             "options": {"queue": "scheduler", "priority": 9},
         },
@@ -653,7 +653,7 @@ def check_risk_acceptances():
 
 
 @celery_app.task(
-    name="workers.toolchain_tasks.check_license_expirations",
+    name="workers.toolchain_tasks.check_panos_license_expirations",
     queue="alerts"
 )
 def check_panos_license_expirations():
@@ -917,8 +917,10 @@ def _save_report(tenant_id: str, job_id: str, report):
             # ── MCP Servers ────────────────────────────────────────────
             for url in getattr(report, "mcp_servers_found", []):
                 try:
-                    port = int(url.split(":")[-1]) if ":" in url else 8080
-                except ValueError:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                except Exception:
                     port = 8080
                 cur.execute("""
                     INSERT INTO mcp_servers
@@ -936,6 +938,11 @@ def _save_report(tenant_id: str, job_id: str, report):
                     (id, tenant_id, score, grade, findings_summary, asset_counts, recorded_at)
                 VALUES
                     (gen_random_uuid()::text, %s, %s, %s, %s::jsonb, '{}'::jsonb, NOW())
+                ON CONFLICT (tenant_id) DO UPDATE SET
+                    score            = EXCLUDED.score,
+                    grade            = EXCLUDED.grade,
+                    findings_summary = EXCLUDED.findings_summary,
+                    recorded_at      = NOW()
             """, (
                 tenant_id,
                 report.risk_score,
@@ -976,10 +983,7 @@ def run_spyonweb_scan(plan_or_tenant: str, domain: str = None,
 
     Findet Shadow-Domains, Schwester-Unternehmen und Typosquatting.
     """
-    import sys
-    sys.path.insert(0, '/mnt/user-data/outputs')
-    # In Produktion: from adapters.tool_adapters import SpyOnWebAdapter
-    # Hier Demo-Implementierung
+    # In Produktion: from easm.tool_adapters import SpyOnWebAdapter
 
     tenants = get_tenants_by_plan(plan_or_tenant) if not domain else [
         {"id": plan_or_tenant, "domain": domain,

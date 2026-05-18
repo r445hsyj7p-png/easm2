@@ -73,7 +73,10 @@ export function AppProvider({ tenantId, children }) {
 
   const triggerScan = useCallback(async (type="full") => {
     const job = await apiFetch(`/tenants/${tenantId}/scans`, {method:"POST",body:{scan_type:type}});
-    setScans(prev => [job,...prev]); return job;
+    // Normalize: backend returns {scan_id, id, status} — ensure both id fields present
+    const normalized = { ...job, id: job.id ?? job.scan_id, scan_type: type, status: job.status ?? "pending" };
+    setScans(prev => [normalized, ...prev]);
+    return normalized;
   }, [tenantId]);
 
   return (

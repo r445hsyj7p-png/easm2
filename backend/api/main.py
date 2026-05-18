@@ -564,9 +564,9 @@ async def trigger_scan(
             kwargs={"request_id": request_id_var.get()},
             queue="scans",
         )
-    except Exception:
-        pass  # Worker not available — job still created in DB
-    return {"scan_id": scan_id, "status": "pending"}
+    except Exception as _dispatch_err:
+        logger.warning(f"[trigger_scan] Celery dispatch failed (scan_id={scan_id}): {_dispatch_err}")
+    return {"scan_id": scan_id, "status": "pending", "id": scan_id}
 
 
 @app.get("/api/v1/tenants/{tenant_id}/scans/{scan_id}", tags=["Scans"])

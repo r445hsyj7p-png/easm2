@@ -141,8 +141,9 @@ export default function AppShell() {
               Nächster: <span style={{ color: T.accent }}>{nextScanStr}</span>
             </div>
             <Btn onClick={() => {
-              triggerScan("full");
-              toast.success("Scan gestartet", { description: "Full-Pipeline läuft im Hintergrund." });
+              triggerScan("full")
+                .then(() => toast.success("Scan gestartet", { description: "Full-Pipeline läuft im Hintergrund." }))
+                .catch(e => toast.error("Scan fehlgeschlagen", { description: e.message }));
             }} variant="primary" size="sm">
               <RefreshCw size={10} />SCAN NOW
             </Btn>

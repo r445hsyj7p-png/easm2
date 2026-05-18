@@ -159,12 +159,12 @@ class EASMPipeline:
         print(f"{'='*60}\n")
 
         # ── Phase 1: Discovery (Subfinder + theHarvester parallel) ────────────
-        print("[Phase 1/5] Subdomain Discovery...")
+        print("[Phase 1/6] Subdomain Discovery...")
         subdomains = self._phase_discovery(report, domain)
         print(f"  → {len(subdomains)} Subdomains gefunden")
 
         # ── Phase 2: Port-Scan (Naabu) ────────────────────────────────────────
-        print("[Phase 2/5] Port-Scanning...")
+        print("[Phase 2/6] Port-Scanning...")
         all_hosts = list(set(ip_ranges + [s.affected_asset for s in subdomains
                                           if "." in s.affected_asset]))
         open_ports = self._phase_portscan(report, all_hosts)
@@ -300,13 +300,14 @@ class EASMPipeline:
 
         # Auch MCP-Findings aus Naabu
         for f in report.findings_naabu:
-            if f.category == "mcp_exposure":
-                host = f.affected_asset.rsplit(":", 1)[0]
-                port = f.affected_asset.rsplit(":", 1)[1]
-                mcp_hosts.extend([
-                    f"http://{host}:{port}",
-                    f"https://{host}:{port}"
-                ])
+            if f.category == "mcp_exposure" and ":" in f.affected_asset:
+                parts = f.affected_asset.rsplit(":", 1)
+                if len(parts) == 2:
+                    host, port = parts
+                    mcp_hosts.extend([
+                        f"http://{host}:{port}",
+                        f"https://{host}:{port}"
+                    ])
 
         report.mcp_servers_found = list(set(mcp_hosts))
         return report.mcp_servers_found
