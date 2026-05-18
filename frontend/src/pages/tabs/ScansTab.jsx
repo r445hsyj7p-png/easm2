@@ -139,8 +139,9 @@ const ScansTab = () => {
       if (snapLogs.length > 0) {
         const threshold = (logI / snapLogs.length) * 100;
         if (p >= threshold && logI < snapLogs.length) {
-          setLogs(l => [...l, snapLogs[logI]]);
+          const entry = snapLogs[logI];
           logI++;
+          if (entry) setLogs(l => [...l, entry]);
         }
       }
       setProgress(p);
@@ -276,8 +277,8 @@ const ScansTab = () => {
           <div ref={logRef} style={{ padding:"14px 18px", fontFamily:"'JetBrains Mono',monospace",
             fontSize:11, lineHeight:1.9, minHeight:240, maxHeight:340, overflowY:"auto" }}>
             {logs.length === 0 ? (
-              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.slug || "—"} --modules {activePhases.map(p => p.key).join(",")}</span>
-            ) : logs.map((line, i) => (
+              <span style={{ color:T.text3 }}>$ ./easm-pipeline run --domain {tenant?.domain || "—"} --modules {activePhases.map(p => p.key).join(",")}</span>
+            ) : logs.filter(Boolean).map((line, i) => (
               <div key={i} style={{ color: COLORS[line.c] || T.text2 }}>
                 <span style={{ color:T.text3, userSelect:"none" }}>[{String(i+1).padStart(2,"0")}] </span>
                 <span style={{ color:T.border2 }}>[{line.t}]</span>
