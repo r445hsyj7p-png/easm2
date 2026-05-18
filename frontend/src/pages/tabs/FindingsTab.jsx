@@ -19,8 +19,8 @@ const FindingsTab = () => {
       (filters.cat === "ALL" || f.cat === filters.cat) &&
       (filters.tool === "ALL" || f.tool === filters.tool) &&
       (!filters.kev || f.kev) &&
-      (!search || f.title.toLowerCase().includes(search.toLowerCase()) ||
-        f.asset.toLowerCase().includes(search.toLowerCase()))
+      (!search || (f.title||"").toLowerCase().includes(search.toLowerCase()) ||
+        (f.asset||"").toLowerCase().includes(search.toLowerCase()))
     )
     .sort((a, b) => {
       let cmp = 0;
@@ -29,12 +29,12 @@ const FindingsTab = () => {
       if (sort.col === "epss")  cmp = (parseFloat(b.epss)||0) - (parseFloat(a.epss)||0);
       if (sort.col === "kev")   cmp = (b.kev?1:0) - (a.kev?1:0);
       if (sort.col === "age")   cmp = b.age - a.age;
-      if (sort.col === "title") cmp = a.title.localeCompare(b.title);
+      if (sort.col === "title") cmp = (a.title||"").localeCompare(b.title||"");
       return sort.dir === "asc" ? cmp : -cmp;
     });
 
   const toggleSort = (col) => setSort(s => s.col === col ? { col, dir: s.dir === "asc" ? "desc" : "asc" } : { col, dir: "asc" });
-  const cats = [...new Set((findings||[]).map(f=>f.cat))];
+  const cats = [...new Set((findings||[]).map(f=>f.cat).filter(Boolean))];
   const tools = [...new Set((findings||[]).map(f=>f.tool))];
 
   return (

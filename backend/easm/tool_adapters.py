@@ -851,8 +851,8 @@ class NucleiAdapter:
             if tags:
                 cmd += ["-tags", tags]
 
-            # Template-Updates (einmalig pro Session)
-            cmd += ["-ud"]  # update templates if needed
+            # Disable auto-update check so nuclei doesn't try to update during scan
+            cmd += ["-duc"]
 
             if not tool_available(self.binary):
                 return self._run_docker(tenant_id, targets, tags, severity_filter)
@@ -989,8 +989,12 @@ class NucleiAdapter:
         finally:
             os.unlink(target_file)
 
-    def _parse(self, tenant_id: str, stdout: str,
+    def _parse(self, tenant_id: str, stdout: str,  # NucleiAdapter
                stderr: str, rc: int) -> list[ToolFinding]:
+        import logging as _log
+        _nlog = _log.getLogger("easm.nuclei")
+        if rc < 0 or (rc != 0 and not stdout.strip()):
+            _nlog.warning("nuclei rc=%d no-stdout stderr=%s", rc, stderr[:300])
         findings = []
         for line in stdout.strip().splitlines():
             if not line.strip():
@@ -1027,7 +1031,7 @@ class NucleiAdapter:
                     cvss_score=float(cvss) if cvss else 0.0,
                     raw_data=entry,
                 ))
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 pass
         return findings
 

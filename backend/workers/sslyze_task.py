@@ -226,7 +226,10 @@ def _scan_target(host: str, port: int) -> list:
                     leaf = chain.received_certificate_chain[0]
 
                     # Expiry
-                    not_after = leaf.not_valid_after_utc.replace(tzinfo=None)
+                    _expiry = getattr(leaf, "not_valid_after_utc", None)
+                    if not _expiry:
+                        continue
+                    not_after = _expiry.replace(tzinfo=None)
                     days_left = (not_after - datetime.datetime.utcnow()).days
 
                     if days_left <= 0:

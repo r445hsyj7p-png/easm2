@@ -582,7 +582,8 @@ async def get_scan(
                COALESCE((findings_count->>'CRITICAL')::int, 0) +
                COALESCE((findings_count->>'HIGH')::int,     0) +
                COALESCE((findings_count->>'MEDIUM')::int,   0) +
-               COALESCE((findings_count->>'LOW')::int,      0) AS findings_count,
+               COALESCE((findings_count->>'LOW')::int,      0) +
+               COALESCE((findings_count->>'INFO')::int,     0) AS findings_count,
                risk_score_after AS risk_score,
                created_at AS started_at, completed_at AS finished_at,
                duration_seconds, error_message,
