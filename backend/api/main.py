@@ -588,7 +588,8 @@ async def get_scan(
                created_at AS started_at, completed_at AS finished_at,
                duration_seconds, error_message,
                COALESCE((raw_results->>'progress_pct')::int, 0) AS progress_pct,
-               COALESCE(raw_results->>'current_phase', '') AS current_phase
+               COALESCE(raw_results->>'current_phase', '') AS current_phase,
+               COALESCE(raw_results->'scan_log', '[]'::jsonb) AS scan_log
         FROM scan_jobs
         WHERE id = :sid AND tenant_id = :tid
     """), {"sid": scan_id, "tid": tenant_id})
@@ -599,6 +600,13 @@ async def get_scan(
     for f in ("started_at", "finished_at"):
         if d.get(f):
             d[f] = d[f].isoformat()
+    # scan_log comes back as a string from asyncpg/psycopg — parse if needed
+    if isinstance(d.get("scan_log"), str):
+        try:
+            import json as _json
+            d["scan_log"] = _json.loads(d["scan_log"])
+        except Exception:
+            d["scan_log"] = []
     return d
 
 # ═══════════════════════════════════════════════════════════════════════════════

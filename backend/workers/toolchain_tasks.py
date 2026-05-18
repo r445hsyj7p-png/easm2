@@ -273,40 +273,66 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             )
 
             _progress(5, "discovery")
+            _log_scan_event(job_id, "pipeline", f"Scan gestartet für {domain or tenant_id}", "info")
+            _log_scan_event(job_id, "subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}", "info")
             subdomains = pipeline._phase_discovery(report, domain)
+            sub_count = len([f for f in report.all_findings if f.category == "subdomain"])
+            _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains gefunden", "info")
+            email_count = len([f for f in report.all_findings if f.category == "email"])
+            if email_count:
+                _log_scan_event(job_id, "theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt", "info")
 
             _progress(20, "portscan")
-            open_ports = pipeline._phase_portscan(report, list(set(
+            _scan_targets = list(set(
                 ip_ranges + [s.affected_asset for s in subdomains if "." in s.affected_asset]
-            )))
+            ))
+            _log_scan_event(job_id, "naabu", f"Port-Scan auf {len(_scan_targets)} Hosts gestartet (SYN, Top-1000)", "info")
+            open_ports = pipeline._phase_portscan(report, _scan_targets)
             mcp_hosts = pipeline._identify_mcp_hosts(report)
+            port_count = sum(len(v) for v in (open_ports or {}).values())
+            _log_scan_event(job_id, "naabu", f"{len(open_ports or {})} Hosts mit offenen Ports — {port_count} Ports total", "info")
+            if mcp_hosts:
+                _log_scan_event(job_id, "naabu", f"MCP-Kandidaten erkannt: {', '.join(list(mcp_hosts)[:5])}", "warn")
 
             _progress(35, "tls")
             tls_targets = pipeline._build_tls_targets(open_ports, subdomains)
+            _log_scan_event(job_id, "sslyze", f"TLS-Analyse auf {len(tls_targets)} Endpunkten", "info")
             pipeline._phase_tls(report, tls_targets)
+            tls_findings = [f for f in report.all_findings if f.tool == "sslyze"]
+            _log_scan_event(job_id, "sslyze", f"{len(tls_findings)} TLS-Findings (Protokoll, Cipher, Zertifikat)", "info")
 
             _progress(50, "http")
             http_targets = pipeline._build_http_targets(open_ports, subdomains)
-            # Always include the root domain so nuclei has at least one target
             if domain:
                 for _scheme in ("https", "http"):
                     _root = f"{_scheme}://{domain}"
                     if _root not in http_targets:
                         http_targets.append(_root)
+            _log_scan_event(job_id, "httpx", f"HTTP-Probing auf {len(http_targets)} URLs (Tech-Stack, Expositionen)", "info")
             pipeline._phase_http(report, http_targets)
+            http_findings = [f for f in report.all_findings if f.tool == "httpx"]
+            _log_scan_event(job_id, "httpx", f"{len(http_findings)} HTTP-Findings", "info")
 
             _progress(70, "vuln")
+            _log_scan_event(job_id, "nuclei", f"Vulnerability-Scan auf {len(http_targets)} Targets (CVE, Misconfig, API)", "info")
             pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), list(mcp_hosts))
+            vuln_findings = [f for f in report.all_findings if f.tool == "nuclei"]
+            _log_scan_event(job_id, "nuclei", f"{len(vuln_findings)} Vulnerabilities gefunden", "info" if not vuln_findings else "warn")
+            crit_vuln = [f for f in vuln_findings if f.severity == "CRITICAL"]
+            if crit_vuln:
+                _log_scan_event(job_id, "nuclei", f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
 
             _progress(88, "mcp")
-            # Always check domain's common MCP ports even without port scan hits
             mcp_phase_targets = list(mcp_hosts)
             if domain and not mcp_phase_targets:
                 for _port in (3000, 8080, 8000, 6274, 6277):
                     mcp_phase_targets.append(f"http://{domain}:{_port}")
                     mcp_phase_targets.append(f"https://{domain}:{_port}")
+            _log_scan_event(job_id, "ramparts", f"MCP-Analyse auf {len(set(mcp_phase_targets))} Kandidaten", "info")
             if config.run_ramparts:
                 pipeline._phase_mcp(report, list(set(mcp_phase_targets)))
+            mcp_findings = [f for f in report.all_findings if f.category == "mcp_exposure"]
+            _log_scan_event(job_id, "ramparts", f"{len(mcp_findings)} MCP-Findings", "info" if not mcp_findings else "error")
 
             _progress(95, "aggregating")
             pipeline._aggregate(report)
@@ -315,6 +341,8 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             report.scan_end = end_ts.isoformat()
             report.duration_seconds = int((end_ts - _scan_start_ts).total_seconds())
             pipeline._print_summary(report)
+            total = len(report.all_findings)
+            _log_scan_event(job_id, "pipeline", f"Scan abgeschlossen — {total} Findings, Score: {report.risk_score}", "info")
             return report
 
         report = _run_with_progress()
@@ -839,7 +867,7 @@ def _build_config(config_dict: dict):
         theharvester_full_sources=True, theharvester_limit=1000,
         httpx_screenshots=True, httpx_threads=100,
         nuclei_tags="api,exposure,misconfig,default-login,mcp,cve",
-        nuclei_severity="low,medium,high,critical",
+        nuclei_severity="info,low,medium,high,critical",
         nuclei_rate=150,
         ramparts_llm=False,
     )
@@ -922,6 +950,41 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
         conn.commit()
     except Exception as exc:
         logger.warning(f"_update_scan_progress failed: {exc}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _log_scan_event(job_id: str, tool: str, msg: str, level: str = "info"):
+    """Appends one log entry to raw_results->scan_log in the DB."""
+    import psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url or not job_id:
+        return
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE scan_jobs
+                SET raw_results = jsonb_set(
+                    COALESCE(raw_results, '{}'::jsonb),
+                    '{scan_log}',
+                    COALESCE(raw_results->'scan_log', '[]'::jsonb)
+                    || jsonb_build_array(jsonb_build_object(
+                        't', %s::text, 'msg', %s::text,
+                        'level', %s::text,
+                        'ts', to_char(NOW() AT TIME ZONE 'UTC', 'HH24:MI:SS')
+                    ))
+                )
+                WHERE id = %s
+            """, (tool, msg, level, job_id))
+        conn.commit()
+    except Exception as exc:
+        logger.debug(f"_log_scan_event failed: {exc}")
     finally:
         if conn:
             try:
@@ -1040,6 +1103,12 @@ def _save_report(tenant_id: str, job_id: str, report):
             except (OSError, TypeError):
                 return None
 
+    # Resolve IPs + org/ASN BEFORE opening DB connection (RDAP calls take up to 80s)
+    _ip_map, _rdap_map = _resolve_assets(
+        list(report.subdomains_discovered),
+        list(report.open_ports.keys()),
+    )
+
     conn = None
     try:
         conn = psycopg2.connect(db_url)
@@ -1080,12 +1149,6 @@ def _save_report(tenant_id: str, job_id: str, report):
                     fp,
                 ))
                 saved_findings += 1
-
-            # ── Resolve IPs + org/ASN for discovered assets ───────────
-            _ip_map, _rdap_map = _resolve_assets(
-                list(report.subdomains_discovered),
-                list(report.open_ports.keys()),
-            )
 
             # ── Assets (Subdomains + IPs) ──────────────────────────────
             seen_assets = set()
