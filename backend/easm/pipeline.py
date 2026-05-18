@@ -213,7 +213,6 @@ class EASMPipeline:
 
     def _phase_discovery(self, report: PipelineReport, domain: str) -> list[ToolFinding]:
         """Phase 1: Parallele Subdomain-Discovery"""
-        from easm.tool_adapters import tool_available
         all_subs = []
 
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -321,10 +320,19 @@ class EASMPipeline:
 
     def _build_tls_targets(self, open_ports: dict,
                             subdomains: list[ToolFinding]) -> list[dict]:
-        """Baut TLS-Target-Liste: [(host, port), ...] für bekannte HTTPS-Ports"""
+        """Baut TLS-Target-Liste für bekannte HTTPS-Ports.
+
+        Für Hosts die der Portscan abgedeckt hat, werden nur tatsächlich
+        offene HTTPS-Ports genutzt. Für Hosts außerhalb des Portscan-Scope
+        (z.B. wenn naabu nicht verfügbar war) wird Port 443 als Fallback
+        angenommen.
+        """
         HTTPS_PORTS = {443, 8443, 9443, 4443, 5986, 6443, 8200}
         targets = []
         seen = set()
+
+        # Hosts mit Portscan-Ergebnissen: nur bestätigte HTTPS-Ports
+        scanned_hosts = set(open_ports.keys())
         for host, ports in open_ports.items():
             for port in ports:
                 if port in HTTPS_PORTS:
@@ -332,12 +340,17 @@ class EASMPipeline:
                     if key not in seen:
                         seen.add(key)
                         targets.append({"host": host, "port": port})
-        # Subdomains auf Port 443
+
+        # Subdomains außerhalb des Portscan-Scope: Port 443 als Fallback
         for sub in subdomains:
-            key = (sub.affected_asset, 443)
+            host = sub.affected_asset
+            if host in scanned_hosts:
+                continue  # Portscan hat entschieden ob 443 offen ist
+            key = (host, 443)
             if key not in seen:
                 seen.add(key)
-                targets.append({"host": sub.affected_asset, "port": 443})
+                targets.append({"host": host, "port": 443})
+
         return targets
 
     def _phase_tls(self, report: PipelineReport, targets: list[dict]):

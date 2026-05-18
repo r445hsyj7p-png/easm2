@@ -235,7 +235,8 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
     job_id = config_dict.get("scan_id") or self.request.id
     logger.info(f"[{job_id}] [req={request_id}] Pipeline START: tenant={tenant_id}")
 
-    # Load tenant domain from DB (config_dict from API only has scan_id + scan_type)
+    # trigger_scan always passes domain/ip_ranges in config_dict, so this branch
+    # only fires when the task is invoked directly (e.g. beat scheduler or CLI).
     if not config_dict.get("domain"):
         tenant_info = _get_tenant_info(tenant_id)
         config_dict = {**config_dict, **tenant_info}
@@ -263,7 +264,6 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         def _run_with_progress():
             domain    = config_dict.get("domain", "")
             ip_ranges = config_dict.get("ip_ranges", [])
-            panos_ver = config_dict.get("panos_version", "")
 
             from easm.pipeline import PipelineReport
             _scan_start_ts = _dt.datetime.utcnow()
