@@ -53,6 +53,8 @@ x-worker-base: &worker-base
   build:
     context: ./backend
     dockerfile: ../docker/Dockerfile.worker
+    args:
+      CACHEBUST: "20260518-1"
   image: easm-worker:latest
   environment:
     <<: *env

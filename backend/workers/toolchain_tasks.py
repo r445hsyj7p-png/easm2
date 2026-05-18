@@ -229,10 +229,15 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
       5. Ramparts → MCP-Tiefenanalyse (falls MCP-Hosts gefunden)
       6. Aggregation → Deduplizierung, Risk-Score, DB
     """
-    from pipeline.orchestrator import EASMPipeline, PipelineConfig
+    from easm.pipeline import EASMPipeline, PipelineConfig
 
     job_id = self.request.id
     logger.info(f"[{job_id}] [req={request_id}] Pipeline START: tenant={tenant_id}")
+
+    # Load tenant domain from DB (config_dict from API only has scan_id + scan_type)
+    if not config_dict.get("domain"):
+        tenant_info = _get_tenant_info(tenant_id)
+        config_dict = {**config_dict, **tenant_info}
 
     try:
         # Status: Running
@@ -310,7 +315,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
 )
 def run_discovery(tenant_id: str, domain: str, api_keys: dict = None):
     """Nur Discovery: Subfinder + theHarvester"""
-    from adapters.tool_adapters import SubfinderAdapter, TheHarvesterAdapter
+    from easm.tool_adapters import SubfinderAdapter, TheHarvesterAdapter
 
     subfinder = SubfinderAdapter(api_keys=api_keys or {})
     harvester = TheHarvesterAdapter()
@@ -344,7 +349,7 @@ def run_discovery(tenant_id: str, domain: str, api_keys: dict = None):
 def run_portscan(tenant_id: str, targets: list,
                  ports: str = "top-1000", rate: int = 1000):
     """Nur Port-Scan: Naabu"""
-    from adapters.tool_adapters import NaabuAdapter
+    from easm.tool_adapters import NaabuAdapter
 
     scanner = NaabuAdapter()
     findings = scanner.run(tenant_id, targets, ports=ports, rate=rate)
@@ -376,7 +381,7 @@ def run_portscan(tenant_id: str, targets: list,
 def run_http_probe(tenant_id: str, urls: list,
                    screenshots: bool = False, threads: int = 50):
     """Nur HTTP-Probing: HTTPX"""
-    from adapters.tool_adapters import HTTPXAdapter
+    from easm.tool_adapters import HTTPXAdapter
 
     prober = HTTPXAdapter()
     findings = prober.run(tenant_id, urls,
@@ -404,7 +409,7 @@ def run_vuln_scan(tenant_id: str, targets: list,
                   tags: str = "api,exposure,misconfig,default-login,cve",
                   severity: str = "medium,high,critical"):
     """Nur Vulnerability-Scan: Nuclei"""
-    from adapters.tool_adapters import NucleiAdapter
+    from easm.tool_adapters import NucleiAdapter
 
     scanner = NucleiAdapter()
     findings = scanner.run(
@@ -441,7 +446,7 @@ def run_mcp_scan(tenant_id: str, targets: list, use_ramparts: bool = True):
     - Prompt-Injection in Tool-Descriptions (Ramparts)
     - mcp.json exponiert
     """
-    from adapters.tool_adapters import NucleiAdapter, RampartsAdapter
+    from easm.tool_adapters import NucleiAdapter, RampartsAdapter
 
     all_findings = []
 
@@ -698,16 +703,71 @@ def send_critical_alert(tenant_id: str, findings: list,
 
 # ─── Hilfsfunktionen ──────────────────────────────────────────────────────────
 
-def _build_config(plan: str, config_dict: dict):
-    """Plan-spezifische Pipeline-Konfiguration"""
-    from pipeline.orchestrator import PipelineConfig
+def _score_to_grade(score: int) -> str:
+    if score >= 90: return "A"
+    if score >= 75: return "B"
+    if score >= 60: return "C"
+    if score >= 40: return "D"
+    return "F"
 
-    # Alle Features für alle Mandanten — kein Plan-Limit
+
+def _get_tenant_info(tenant_id: str) -> dict:
+    """Loads domain, ip_ranges, panos_version from DB for a tenant."""
+    import psycopg2, psycopg2.extras
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        logger.error("DATABASE_URL not set — cannot load tenant info")
+        return {}
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    COALESCE(MIN(d.domain), t.slug, '') AS domain,
+                    COALESCE(
+                        array_agg(DISTINCT r) FILTER (WHERE r IS NOT NULL), '{}'
+                    ) AS ip_ranges,
+                    COALESCE(MAX(d.panos_version), '') AS panos_version
+                FROM tenants t
+                LEFT JOIN domains d
+                    ON d.tenant_id = t.id AND d.status = 'active'
+                LEFT JOIN LATERAL unnest(d.ip_ranges) AS r ON TRUE
+                WHERE t.id = %s
+                GROUP BY t.id, t.slug
+            """, (tenant_id,))
+            row = cur.fetchone()
+        conn.close()
+        if row:
+            return {
+                "domain":        row["domain"] or "",
+                "ip_ranges":     list(row["ip_ranges"] or []),
+                "panos_version": row["panos_version"] or "",
+            }
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der Tenant-Info: {e}")
+    return {}
+
+
+def _build_config(config_dict: dict):
+    """Pipeline-Konfiguration aus config_dict aufbauen."""
+    from easm.pipeline import PipelineConfig
+
+    scan_type = config_dict.get("scan_type", "full")
+    selected = set(scan_type.split(",")) if scan_type != "full" else None
+
+    def _on(key):
+        return selected is None or key in selected
+
     return PipelineConfig(
         api_keys=config_dict.get("api_keys", {}),
-        run_subfinder=True, run_naabu=True, run_theharvester=True,
-        run_httpx=True, run_nuclei=True, run_ramparts=True,
-        run_sslyze=True, run_mcp_scan=True,
+        run_subfinder=_on("discovery"),
+        run_theharvester=_on("discovery"),
+        run_naabu=_on("portscan"),
+        run_sslyze=_on("tls"),
+        run_httpx=_on("http"),
+        run_nuclei=_on("vuln"),
+        run_ramparts=_on("mcp"),
+        run_mcp_scan=_on("mcp"),
         subfinder_recursive=True,
         naabu_ports="top-1000", naabu_rate=2000, naabu_nmap=True,
         theharvester_full_sources=True, theharvester_limit=1000,
@@ -721,24 +781,178 @@ def _build_config(plan: str, config_dict: dict):
 
 def _update_scan_status(job_id: str, status: str,
                          tenant_id: str, data: dict = None):
-    """Scan-Status in DB aktualisieren"""
-    logger.info(f"Scan {job_id[:8]}... [{tenant_id}]: {status}")
-    # In Produktion: DB-Update via SQLAlchemy
+    """Aktualisiert scan_jobs in DB via psycopg2 (synchron, Celery-kompatibel)."""
+    import psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        logger.error("DATABASE_URL nicht gesetzt — Status-Update übersprungen")
+        return
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            if status == "running":
+                cur.execute(
+                    "UPDATE scan_jobs SET status='running', started_at=NOW() WHERE id=%s",
+                    (job_id,)
+                )
+            elif status == "completed":
+                by_sev = data.get("by_severity", {}) if data else {}
+                cur.execute("""
+                    UPDATE scan_jobs SET
+                        status            = 'completed',
+                        completed_at      = NOW(),
+                        duration_seconds  = %s,
+                        risk_score_after  = %s,
+                        findings_count    = %s,
+                        raw_results       = %s
+                    WHERE id = %s
+                """, (
+                    data.get("duration_seconds") if data else None,
+                    data.get("risk_score")       if data else None,
+                    json.dumps(by_sev),
+                    json.dumps(data or {}),
+                    job_id,
+                ))
+            elif status in ("failed", "error"):
+                cur.execute("""
+                    UPDATE scan_jobs SET
+                        status        = 'error',
+                        completed_at  = NOW(),
+                        error_message = %s
+                    WHERE id = %s
+                """, (
+                    (data or {}).get("error", "unknown error"),
+                    job_id,
+                ))
+        conn.commit()
+        conn.close()
+        logger.info(f"[{job_id[:8]}] Status → {status}")
+    except Exception as exc:
+        logger.error(f"_update_scan_status DB-Fehler: {exc}")
 
 
 def _save_report(tenant_id: str, job_id: str, report):
-    """Pipeline-Report in DB speichern"""
-    logger.info(
-        f"Speichere Report: tenant={tenant_id}, "
-        f"findings={report.stats.get('total_findings',0)}, "
-        f"score={report.risk_score}"
-    )
-    # In Produktion:
-    # with SessionLocal() as db:
-    #     for finding in report.all_findings:
-    #         db_finding = Finding(tenant_id=tenant_id, ...)
-    #         db.merge(db_finding)  # upsert via fingerprint
-    #     db.commit()
+    """Speichert Findings, Assets, MCP-Server und Score in DB."""
+    import psycopg2, psycopg2.extras, hashlib as _hl
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        logger.error("DATABASE_URL nicht gesetzt — Report nicht gespeichert")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url)
+        saved_findings = 0
+        saved_assets   = 0
+        saved_mcp      = 0
+
+        with conn.cursor() as cur:
+            # ── Findings ──────────────────────────────────────────────────
+            for f in report.all_findings:
+                fp = _hl.sha256(
+                    f"{tenant_id}:{f.category}:{f.affected_asset}:{f.cve_id or f.title}".encode()
+                ).hexdigest()
+                cur.execute("""
+                    INSERT INTO findings_v2
+                        (id, tenant_id, scan_job_id, sev, cat, tool,
+                         title, asset, cve, cvss, kev, "desc", fix,
+                         fingerprint, first_seen, last_seen)
+                    VALUES
+                        (gen_random_uuid()::text, %s, %s, %s, %s, %s,
+                         %s, %s, %s, %s, %s, %s, %s,
+                         %s, NOW(), NOW())
+                    ON CONFLICT (fingerprint) DO UPDATE SET
+                        sev       = EXCLUDED.sev,
+                        cvss      = EXCLUDED.cvss,
+                        kev       = EXCLUDED.kev,
+                        scan_job_id = EXCLUDED.scan_job_id,
+                        last_seen = NOW()
+                """, (
+                    tenant_id, job_id,
+                    f.severity, f.category, f.tool,
+                    f.title, f.affected_asset,
+                    getattr(f, "cve_id",    None),
+                    getattr(f, "cvss_score", None),
+                    bool(getattr(f, "cisa_kev", False)),
+                    f.description,
+                    getattr(f, "remediation", None),
+                    fp,
+                ))
+                saved_findings += 1
+
+            # ── Assets (Subdomains + IPs) ──────────────────────────────
+            seen_assets = set()
+            for fqdn in report.subdomains_discovered:
+                if fqdn in seen_assets:
+                    continue
+                seen_assets.add(fqdn)
+                cur.execute("""
+                    INSERT INTO assets
+                        (id, tenant_id, fqdn, ip, org, asn,
+                         ports, risk, sources, takeover, technologies,
+                         first_seen, last_seen)
+                    VALUES
+                        (gen_random_uuid()::text, %s, %s,
+                         NULL, NULL, NULL,
+                         '{}', 'LOW', ARRAY['subfinder'], FALSE, '[]',
+                         NOW(), NOW())
+                    ON CONFLICT DO NOTHING
+                """, (tenant_id, fqdn))
+                saved_assets += 1
+
+            for host, ports in report.open_ports.items():
+                cur.execute("""
+                    INSERT INTO assets
+                        (id, tenant_id, fqdn, ip, org, asn,
+                         ports, risk, sources, takeover, technologies,
+                         first_seen, last_seen)
+                    VALUES
+                        (gen_random_uuid()::text, %s, %s,
+                         NULL, NULL, NULL,
+                         %s, 'MEDIUM', ARRAY['naabu'], FALSE, '[]',
+                         NOW(), NOW())
+                    ON CONFLICT DO NOTHING
+                """, (tenant_id, host, ports))
+                saved_assets += 1
+
+            # ── MCP Servers ────────────────────────────────────────────
+            for url in getattr(report, "mcp_servers_found", []):
+                try:
+                    port = int(url.split(":")[-1]) if ":" in url else 8080
+                except ValueError:
+                    port = 8080
+                cur.execute("""
+                    INSERT INTO mcp_servers
+                        (id, tenant_id, url, port, auth, risk, first_seen)
+                    VALUES
+                        (gen_random_uuid()::text, %s, %s, %s, FALSE, 'CRITICAL', NOW())
+                    ON CONFLICT DO NOTHING
+                """, (tenant_id, url, port))
+                saved_mcp += 1
+
+            # ── Tenant Risk Score ──────────────────────────────────────
+            by_sev = report.stats.get("by_severity", {})
+            cur.execute("""
+                INSERT INTO tenant_scores
+                    (id, tenant_id, score, grade, findings_summary, asset_counts, recorded_at)
+                VALUES
+                    (gen_random_uuid()::text, %s, %s, %s, %s::jsonb, '{}'::jsonb, NOW())
+            """, (
+                tenant_id,
+                report.risk_score,
+                _score_to_grade(report.risk_score),
+                json.dumps(by_sev),
+            ))
+
+        conn.commit()
+        conn.close()
+        logger.info(
+            f"[{tenant_id}] Report gespeichert: "
+            f"{saved_findings} Findings, {saved_assets} Assets, {saved_mcp} MCP-Server"
+        )
+    except Exception as exc:
+        logger.error(f"_save_report DB-Fehler: {exc}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
