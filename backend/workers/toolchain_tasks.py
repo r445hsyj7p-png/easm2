@@ -279,8 +279,20 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             _log_scan_event(job_id, "pipeline", f"Scan gestartet für {domain or tenant_id}", "info")
             _log_scan_event(job_id, "subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}", "info")
             subdomains = pipeline._phase_discovery(report, domain)
-            sub_count = len([f for f in report.all_findings if f.category == "subdomain"])
-            _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains gefunden", "info")
+            # Ensure root domain is always included for FQDN inventory and HTTP targets
+            if domain and domain not in report.subdomains_discovered:
+                report.subdomains_discovered.append(domain)
+                from easm.tool_adapters import ToolFinding as _TF
+                _root_finding = _TF(
+                    tenant_id=tenant_id, tool="subfinder", category="subdomain",
+                    severity="INFO", title=f"Root-Domain: {domain}",
+                    description=f"Root-Domain {domain} als Asset aufgenommen.",
+                    affected_asset=domain,
+                )
+                report.findings_subfinder.append(_root_finding)
+                subdomains.append(_root_finding)
+            sub_count = len(report.subdomains_discovered)
+            _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains/Domains gefunden", "info")
             email_count = len([f for f in report.all_findings if f.category == "email"])
             if email_count:
                 _log_scan_event(job_id, "theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt", "info")
@@ -1080,6 +1092,57 @@ def _resolve_assets(fqdns: list, hosts: list) -> tuple:
                     pass
     except Exception:
         pass
+
+    # PTR + cloud provider fallback for IPs with no RDAP org
+    import re as _re
+    CLOUD_PTR = [
+        (_re.compile(r"\.amazonaws\.com$", _re.I),        "Amazon AWS",       16509),
+        (_re.compile(r"\.compute\.internal$", _re.I),     "Google Cloud",     15169),
+        (_re.compile(r"\.googleusercontent\.com$", _re.I),"Google Cloud",     15169),
+        (_re.compile(r"\.google\.com$", _re.I),           "Google Cloud",     15169),
+        (_re.compile(r"\.azure\.com$|\.windows\.net$",_re.I), "Microsoft Azure", 8075),
+        (_re.compile(r"\.cloudflare\.com$|\.cloudflare\.net$", _re.I), "Cloudflare", 13335),
+        (_re.compile(r"\.hetzner\.com$|\.hetzner\.cloud$|\.your-server\.de$", _re.I), "Hetzner", 24940),
+        (_re.compile(r"\.ovh\.net$|\.ovh\.com$|\.ovh-hosting\.fr$", _re.I), "OVH", 16276),
+        (_re.compile(r"\.digitalocean\.com$", _re.I),    "DigitalOcean",     14061),
+        (_re.compile(r"\.fastly\.net$", _re.I),          "Fastly",           54113),
+        (_re.compile(r"\.linode\.com$|\.linodeobjects\.com$", _re.I), "Linode/Akamai", 63949),
+        (_re.compile(r"\.vultr\.com$", _re.I),           "Vultr",            20473),
+        (_re.compile(r"\.netlify\.com$", _re.I),         "Netlify",          394699),
+        (_re.compile(r"\.vercel\.app$", _re.I),          "Vercel",           394699),
+        (_re.compile(r"\.contabo\.net$|\.contabo\.com$", _re.I), "Contabo", 51167),
+        (_re.compile(r"\.strato\.de$|\.strato\.com$", _re.I), "Strato", 6724),
+    ]
+
+    def _ptr_org(ip):
+        try:
+            ptr = _sock.gethostbyaddr(ip)[0]
+            for pattern, org, asn in CLOUD_PTR:
+                if pattern.search(ptr):
+                    return org, asn
+            # Generic: use last 2 parts of PTR as org name
+            parts = ptr.rstrip(".").split(".")
+            if len(parts) >= 2:
+                return ".".join(parts[-2:]), 0
+        except Exception:
+            pass
+        return "", 0
+
+    needs_ptr = [ip for ip in unique_ips if not rdap_map.get(ip, ("", 0))[0]]
+    if needs_ptr:
+        try:
+            with _TPE(max_workers=20) as ex:
+                ptr_futs = {ex.submit(_ptr_org, ip): ip for ip in needs_ptr[:30]}
+                for fut in _ac(ptr_futs, timeout=15):
+                    try:
+                        ip = ptr_futs[fut]
+                        org, asn = fut.result()
+                        if org:
+                            rdap_map[ip] = (org, asn)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     return ip_map, rdap_map
 

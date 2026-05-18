@@ -133,27 +133,29 @@ class SubfinderAdapter:
         if log_fn:
             log_fn("subfinder", f"binary {'verfügbar' if _avail else 'NICHT gefunden — Docker-Fallback'}", "info" if _avail else "warn")
         if not _avail:
-            return self._fallback_docker(tenant_id, domain)
+            return self._fallback_docker(tenant_id, domain, log_fn)
 
-        # Konfigurationsdatei mit API-Keys erstellen
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml',
-                                         delete=False) as cfg:
-            cfg_content = self._build_config()
-            cfg.write(cfg_content)
-            cfg_path = cfg.name
+        cmd = [
+            self.binary,
+            "-d", domain,
+            "-json",
+            "-silent",
+            "-all",                    # Alle Quellen nutzen
+        ]
+        if recursive:
+            cmd += ["-recursive"]
+
+        # Provider config only when API keys are present (empty config causes warnings)
+        cfg_path = None
+        cfg_content = self._build_config()
+        if cfg_content.strip():
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml',
+                                             delete=False) as cfg:
+                cfg.write(cfg_content)
+                cfg_path = cfg.name
+            cmd += ["-provider-config", cfg_path]
 
         try:
-            cmd = [
-                self.binary,
-                "-d", domain,
-                "-json",
-                "-silent",
-                "-all",                    # Alle Quellen nutzen
-                "-provider-config", cfg_path,
-            ]
-            if recursive:
-                cmd += ["-recursive"]
-
             rc, stdout, stderr = _run(cmd, timeout=300)
             if log_fn:
                 n_lines = len([l for l in stdout.splitlines() if l.strip()])
@@ -164,30 +166,60 @@ class SubfinderAdapter:
             return self._parse(tenant_id, domain, stdout, stderr, rc)
 
         finally:
-            os.unlink(cfg_path)
+            if cfg_path and os.path.exists(cfg_path):
+                os.unlink(cfg_path)
 
     def run_docker(self, tenant_id: str, domain: str) -> list[ToolFinding]:
         """Fallback: Subfinder via Docker"""
         cmd = [
             "docker", "run", "--rm",
-            "-it",
             "projectdiscovery/subfinder:latest",
             "-d", domain, "-json", "-silent", "-all"
         ]
         rc, stdout, stderr = _run(cmd, timeout=300)
         return self._parse(tenant_id, domain, stdout, stderr, rc)
 
-    def _fallback_docker(self, tenant_id: str, domain: str) -> list[ToolFinding]:
-        """Versucht Docker wenn Binary nicht verfügbar"""
+    def _fallback_docker(self, tenant_id: str, domain: str, log_fn=None) -> list[ToolFinding]:
+        """Versucht Docker, dann crt.sh Certificate Transparency als Fallback"""
         if shutil.which("docker"):
             return self.run_docker(tenant_id, domain)
-        # Kein Tool verfügbar — leere Liste
-        return [ToolFinding(
-            tenant_id=tenant_id, tool="subfinder", category="error",
-            severity="INFO", title="Subfinder nicht verfügbar",
-            description="Subfinder Binary und Docker nicht gefunden. Bitte installieren.",
-            affected_asset=domain
-        )]
+        return self._crtsh_fallback(tenant_id, domain, log_fn)
+
+    def _crtsh_fallback(self, tenant_id: str, domain: str, log_fn=None) -> list[ToolFinding]:
+        """Pure-Python Subdomain-Discovery via crt.sh Certificate Transparency Logs"""
+        import urllib.request as _ur
+        findings = []
+        try:
+            url = f"https://crt.sh/?q=%.{domain}&output=json"
+            req = _ur.Request(url, headers={"User-Agent": "EASM-Scanner/1.0"})
+            with _ur.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            seen: set = set()
+            for entry in data:
+                for raw in (entry.get("common_name", ""), entry.get("name_value", "")):
+                    for sub in raw.splitlines():
+                        sub = sub.strip().lstrip("*.")
+                        if not sub:
+                            continue
+                        if sub == domain or sub.endswith(f".{domain}"):
+                            if sub not in seen:
+                                seen.add(sub)
+                                label = sub.split(".")[0]
+                                sev = "HIGH" if label in self.HIGH_RISK_PATTERNS else "INFO"
+                                findings.append(ToolFinding(
+                                    tenant_id=tenant_id, tool="subfinder",
+                                    category="subdomain", severity=sev,
+                                    title=f"Subdomain entdeckt: {sub}",
+                                    description=f"Subdomain via Certificate Transparency (crt.sh): {sub}",
+                                    affected_asset=sub,
+                                    raw_data={"source": "crt.sh"},
+                                ))
+            if log_fn:
+                log_fn("subfinder", f"crt.sh CT-Fallback: {len(findings)} Subdomains für {domain}", "info")
+        except Exception as e:
+            if log_fn:
+                log_fn("subfinder", f"crt.sh Fallback fehlgeschlagen: {e}", "warn")
+        return findings
 
     def _build_config(self) -> str:
         """Erzeugt Subfinder YAML-Config mit API-Keys"""
@@ -351,9 +383,11 @@ class NaabuAdapter:
             if nmap_integration:
                 cmd += ["-nmap-cli", "nmap -sV -sC"]
 
-            # Docker-Fallback
+            # Docker-Fallback, then Python fallback
             if not _avail:
-                return self._run_docker(tenant_id, targets, ports, rate)
+                if shutil.which("docker"):
+                    return self._run_docker(tenant_id, targets, ports, rate)
+                return self._python_portscan_fallback(tenant_id, targets, log_fn)
 
             rc, stdout, stderr = _run(cmd, timeout=600)
             if log_fn:
@@ -374,6 +408,51 @@ class NaabuAdapter:
                "-host", target_str, "-json", "-silent"] + port_arg
         rc, stdout, stderr = _run(cmd, timeout=600)
         return self._parse(tenant_id, stdout, stderr, rc)
+
+    def _python_portscan_fallback(self, tenant_id: str, targets: list[str], log_fn=None) -> list[ToolFinding]:
+        """Pure-Python TCP port scan on common ports when naabu and Docker unavailable."""
+        import socket as _s
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
+                        1433, 1521, 2375, 3000, 3306, 3389, 4000, 5000, 5432, 5900,
+                        5985, 6274, 6277, 6379, 8000, 8080, 8443, 8888, 9000, 9200,
+                        10250, 27017]
+        findings = []
+        hosts = list({t.replace("http://","").replace("https://","").split("/")[0].split(":")[0]
+                      for t in targets if t})[:15]
+
+        def _check(host, port):
+            try:
+                with _s.create_connection((host, port), timeout=2):
+                    return True
+            except Exception:
+                return False
+
+        for host in hosts:
+            with _TPE(max_workers=30) as ex:
+                futs = {ex.submit(_check, host, p): p for p in COMMON_PORTS}
+                for fut, port in futs.items():
+                    try:
+                        if fut.result(timeout=3):
+                            service = self.SERVICE_MAP.get(port, f"Port {port}")
+                            is_mcp = port in self.MCP_PORTS
+                            sev = ("CRITICAL" if port in self.CRITICAL_PORTS
+                                   else "HIGH" if port in self.HIGH_PORTS or is_mcp
+                                   else "MEDIUM")
+                            findings.append(ToolFinding(
+                                tenant_id=tenant_id, tool="naabu",
+                                category="mcp_exposure" if is_mcp else "port",
+                                severity=sev,
+                                title=f"{service} exponiert: {host}:{port}",
+                                description=f"Port {port} ({service}) auf {host} ist offen.",
+                                affected_asset=f"{host}:{port}",
+                                raw_data={"ip": host, "port": port},
+                            ))
+                    except Exception:
+                        pass
+        if log_fn:
+            log_fn("naabu", f"Python TCP-Fallback: {len(findings)} offene Ports auf {len(hosts)} Hosts", "info")
+        return findings
 
     def _parse(self, tenant_id: str, stdout: str,
                stderr: str, rc: int) -> list[ToolFinding]:
@@ -462,6 +541,18 @@ class TheHarvesterAdapter:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             output_file = tf.name
 
+        _avail = tool_available("theHarvester")
+        if log_fn:
+            log_fn("theharvester", f"binary {'verfügbar' if _avail else 'NICHT gefunden — übersprungen'}", "info" if _avail else "warn")
+
+        if not _avail:
+            # Clean up the temp file and return empty — no fallback for theHarvester
+            try:
+                os.unlink(output_file)
+            except Exception:
+                pass
+            return []
+
         try:
             cmd = [
                 "theHarvester",
@@ -469,10 +560,14 @@ class TheHarvesterAdapter:
                 "-b", sources,
                 "-l", str(limit),
                 "-f", output_file.replace(".json", ""),  # theHarvester fügt .json hinzu
-                "--dns-lookup",
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
+            if log_fn:
+                if rc != 0:
+                    log_fn("theharvester", f"rc={rc} | stderr: {(stderr or '').strip()[:200]}", "error")
+                else:
+                    log_fn("theharvester", f"rc=0, Ausgabe geparst", "info")
             return self._parse_json(tenant_id, domain, output_file, stdout)
 
         finally:
@@ -904,7 +999,9 @@ class NucleiAdapter:
                 cmd += ["-duc"]
 
             if not _avail:
-                return self._run_docker(tenant_id, targets, tags, severity_filter)
+                if shutil.which("docker"):
+                    return self._run_docker(tenant_id, targets, tags, severity_filter)
+                return self._python_http_checks(tenant_id, targets, log_fn)
 
             rc, stdout, stderr = _run(cmd, timeout=900)
             findings = self._parse(tenant_id, stdout, stderr, rc)
@@ -946,6 +1043,101 @@ class NucleiAdapter:
 
         # Zusätzlich: manuelle MCP-Handshake-Checks
         findings += self._check_mcp_handshake(tenant_id, targets)
+        return findings
+
+    def _python_http_checks(self, tenant_id: str, targets: list[str], log_fn=None) -> list[ToolFinding]:
+        """Pure-Python HTTP security checks when nuclei binary is unavailable."""
+        import urllib.request as _ur
+        import urllib.error as _ue
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        SECURITY_HEADERS = [
+            ("Strict-Transport-Security", "MEDIUM", "HSTS-Header fehlt",
+             "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload setzen"),
+            ("Content-Security-Policy", "MEDIUM", "Content-Security-Policy fehlt",
+             "CSP-Header setzen um XSS und Injection-Angriffe zu verhindern"),
+            ("X-Frame-Options", "LOW", "X-Frame-Options fehlt (Clickjacking)",
+             "X-Frame-Options: DENY oder SAMEORIGIN setzen"),
+            ("X-Content-Type-Options", "LOW", "X-Content-Type-Options fehlt",
+             "X-Content-Type-Options: nosniff setzen"),
+            ("Referrer-Policy", "LOW", "Referrer-Policy fehlt",
+             "Referrer-Policy: strict-origin-when-cross-origin setzen"),
+        ]
+        EXPOSED_PATHS = [
+            ("/.env", "CRITICAL", "Exposed .env Datei", "Umgebungsvariablen und Credentials öffentlich zugänglich"),
+            ("/.git/config", "HIGH", "Exposed .git/config", "Git-Repository-Konfiguration öffentlich zugänglich"),
+            ("/phpinfo.php", "MEDIUM", "phpinfo() exponiert", "PHP-Konfigurationsdetails öffentlich zugänglich"),
+            ("/.htaccess", "MEDIUM", "Exposed .htaccess", "Apache-Konfigurationsdatei öffentlich zugänglich"),
+            ("/wp-config.php.bak", "CRITICAL", "WordPress Config Backup exponiert", "WordPress-Datenbank-Credentials potenziell zugänglich"),
+            ("/config.php", "HIGH", "Exposed config.php", "Konfigurationsdatei öffentlich zugänglich"),
+            ("/backup.sql", "CRITICAL", "SQL-Backup exponiert", "Datenbank-Backup öffentlich zugänglich"),
+            ("/server-status", "MEDIUM", "Apache server-status exponiert", "Server-Metriken und Anfrageliste öffentlich zugänglich"),
+            ("/actuator/env", "CRITICAL", "Spring Boot Actuator /env exponiert", "Umgebungsvariablen und Secrets öffentlich zugänglich"),
+            ("/actuator/health", "LOW", "Spring Boot Actuator /health exponiert", "Anwendungs-Health-Informationen öffentlich zugänglich"),
+        ]
+
+        findings = []
+        urls = [t for t in targets if t.startswith(("http://", "https://"))][:20]
+
+        def _check_url(url):
+            local_findings = []
+            try:
+                req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0 EASM-Scanner/1.0"})
+                resp = _ur.urlopen(req, timeout=10)
+                headers_lc = {k.lower(): v for k, v in resp.headers.items()}
+
+                for hdr, sev, title, fix in SECURITY_HEADERS:
+                    if hdr.lower() not in headers_lc:
+                        local_findings.append(ToolFinding(
+                            tenant_id=tenant_id, tool="nuclei",
+                            category="vulnerability", severity=sev,
+                            title=f"{title}: {url}",
+                            description=f"Security-Header '{hdr}' fehlt auf {url}.",
+                            affected_asset=url,
+                            remediation=fix,
+                        ))
+
+                server = headers_lc.get("server", "")
+                if server:
+                    local_findings.append(ToolFinding(
+                        tenant_id=tenant_id, tool="httpx",
+                        category="http", severity="INFO",
+                        title=f"Server-Header: {server}",
+                        description=f"Server-Banner auf {url}: {server}",
+                        affected_asset=url,
+                    ))
+            except _ue.HTTPError as e:
+                if e.code not in (401, 403, 404):
+                    pass
+            except Exception:
+                pass
+
+            for path, sev, title, desc in EXPOSED_PATHS:
+                try:
+                    check_url = url.rstrip("/") + path
+                    req = _ur.Request(check_url, headers={"User-Agent": "Mozilla/5.0 EASM-Scanner/1.0"})
+                    resp = _ur.urlopen(req, timeout=5)
+                    if resp.status == 200:
+                        content = resp.read(512).decode("utf-8", errors="ignore")
+                        if len(content) > 10:
+                            local_findings.append(ToolFinding(
+                                tenant_id=tenant_id, tool="nuclei",
+                                category="vulnerability", severity=sev,
+                                title=f"{title}: {url}",
+                                description=f"{desc}. URL: {check_url}",
+                                affected_asset=check_url,
+                            ))
+                except Exception:
+                    pass
+
+            return local_findings
+
+        with _TPE(max_workers=8) as ex:
+            for result in ex.map(_check_url, urls):
+                findings.extend(result)
+
+        if log_fn:
+            log_fn("nuclei", f"Python HTTP-Fallback: {len(findings)} Findings auf {len(urls)} URLs", "info")
         return findings
 
     def _check_mcp_handshake(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
