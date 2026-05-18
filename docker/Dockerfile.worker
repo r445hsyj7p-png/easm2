@@ -55,21 +55,17 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     chmod +x /usr/local/bin/naabu && \
     rm -rf /tmp/subfinder* /tmp/httpx* /tmp/naabu*
 
-# theHarvester — OSINT tool (pinned stable tag, explicit clone)
-# pip install git+... requires git in PATH — that's why the previous approach
-# failed silently. We also create a shell wrapper instead of relying on
-# pip's entry-point generation.
-RUN git clone --depth 1 --branch v4.6.0 \
+# theHarvester — OSINT tool
+# Notes:
+#   - pip install git+... silently failed because git was missing from PATH
+#   - v4.8.0 uses pyproject.toml (no requirements/base.txt) — pip install . is correct
+#   - Tags have no 'v' prefix: 4.8.0 not v4.8.0
+#   - pip creates /usr/local/bin/theHarvester entry point from pyproject.toml
+RUN git clone --depth 1 --branch 4.8.0 \
       https://github.com/laramies/theHarvester.git /opt/theHarvester \
-    && pip install --no-cache-dir \
-       dnspython aiodns aiohttp lxml requests netaddr \
-    && pip install --no-cache-dir \
-       -r /opt/theHarvester/requirements/base.txt \
-    && printf '#!/bin/sh\nexec python3 /opt/theHarvester/theHarvester.py "$@"\n' \
-       > /usr/local/bin/theHarvester \
-    && chmod +x /usr/local/bin/theHarvester \
+    && pip install --no-cache-dir /opt/theHarvester \
     && theHarvester --help 2>&1 | head -2 \
-    && echo "theHarvester v4.6.0 OK"
+    && echo "theHarvester 4.8.0 OK"
 
 # Python dependencies
 WORKDIR /app
@@ -78,7 +74,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ramparts is worker-only and may not be on PyPI — install best-effort
 RUN pip install --no-cache-dir ramparts || echo "ramparts not available on PyPI, skipping"
 
-# App code — CACHEBUST=20260518-5
+# App code — CACHEBUST=20260518-6
 COPY . .
 
 # Entrypoint

@@ -251,7 +251,7 @@ class EASMPipeline:
                         report.findings_theharvester = findings
                         for f in findings:
                             if f.category == "email":
-                                report.emails_harvested = f.raw_data.get("emails", [])
+                                report.emails_harvested.extend(f.raw_data.get("emails", []))
                 except Exception as e:
                     self._log(tool, f"Phase-Fehler: {e}", "error")
 
@@ -355,7 +355,7 @@ class EASMPipeline:
                         findings_raw.extend(fut.result())
                     except Exception as e:
                         t = futures[fut]
-                        print(f"  ⚠ SSLyze {t['host']}:{t['port']}: {e}")
+                        self._log("sslyze", f"{t['host']}:{t['port']}: {e}", "warn")
             tls_findings = []
             for raw in findings_raw:
                 tls_findings.append(ToolFinding(
@@ -370,7 +370,7 @@ class EASMPipeline:
                 ))
             report.findings_sslyze = tls_findings
         except Exception as e:
-            print(f"  ⚠ SSLyze Fehler: {e}")
+            self._log("sslyze", f"Phase-Fehler: {e}", "error")
 
     def _build_http_targets(self, open_ports: dict,
                              subdomains: list[ToolFinding]) -> list[str]:

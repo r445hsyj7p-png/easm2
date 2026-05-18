@@ -259,7 +259,6 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         pipeline = EASMPipeline(tenant_id=tenant_id, config=config, log_fn=_diag_log)
 
         import datetime as _dt
-        _start = _dt.datetime.utcnow()
 
         def _run_with_progress():
             domain    = config_dict.get("domain", "")
@@ -335,14 +334,12 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
                 _log_scan_event(job_id, "nuclei", f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
 
             _progress(88, "mcp")
-            mcp_phase_targets = list(mcp_hosts)
-            if domain and not mcp_phase_targets:
-                for _port in (3000, 8080, 8000, 6274, 6277):
-                    mcp_phase_targets.append(f"http://{domain}:{_port}")
-                    mcp_phase_targets.append(f"https://{domain}:{_port}")
-            _log_scan_event(job_id, "ramparts", f"MCP-Analyse auf {len(set(mcp_phase_targets))} Kandidaten", "info")
-            if config.run_ramparts:
-                pipeline._phase_mcp(report, list(set(mcp_phase_targets)))
+            mcp_phase_targets = list(set(mcp_hosts))
+            if mcp_phase_targets and config.run_ramparts:
+                _log_scan_event(job_id, "ramparts", f"MCP-Analyse auf {len(mcp_phase_targets)} Kandidaten", "info")
+                pipeline._phase_mcp(report, mcp_phase_targets)
+            else:
+                _log_scan_event(job_id, "ramparts", "Keine MCP-Hosts gefunden — Ramparts übersprungen", "info")
             _mcp_pre_agg = [f for f in report.findings_ramparts + report.findings_naabu
                             if f.category == "mcp_exposure"]
             _log_scan_event(job_id, "ramparts", f"{len(_mcp_pre_agg)} MCP-Findings", "info" if not _mcp_pre_agg else "warn")
@@ -513,8 +510,8 @@ def run_http_probe(tenant_id: str, urls: list,
     queue="vuln"
 )
 def run_vuln_scan(tenant_id: str, targets: list,
-                  tags: str = "api,exposure,misconfig,default-login,cve",
-                  severity: str = "medium,high,critical"):
+                  tags: str = "api,exposure,misconfig,default-logins,tech,cve",
+                  severity: str = "info,medium,high,critical"):
     """Nur Vulnerability-Scan: Nuclei"""
     from easm.tool_adapters import NucleiAdapter
 
@@ -958,10 +955,17 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
     try:
         conn = psycopg2.connect(db_url)
         with conn.cursor() as cur:
+            # Use jsonb_set per key instead of || so scan_log (and other keys
+            # written by concurrent _log_scan_event calls) are never overwritten.
             cur.execute("""
                 UPDATE scan_jobs
-                SET raw_results = COALESCE(raw_results, '{}'::jsonb)
-                    || jsonb_build_object('progress_pct', %s, 'current_phase', %s)
+                SET raw_results = jsonb_set(
+                    jsonb_set(
+                        COALESCE(raw_results, '{}'::jsonb),
+                        '{progress_pct}', to_jsonb(%s::int)
+                    ),
+                    '{current_phase}', to_jsonb(%s::text)
+                )
                 WHERE id = %s
             """, (pct, phase, job_id))
         conn.commit()
