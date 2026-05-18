@@ -244,6 +244,9 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         """Persist progress_pct so the frontend poll can show real progress."""
         _update_scan_progress(job_id, pct, phase)
 
+    def _diag_log(tool: str, msg: str, level: str = "info"):
+        _log_scan_event(job_id, tool, msg, level)
+
     try:
         # Status: Running
         _update_scan_status(job_id, "running", tenant_id)
@@ -253,7 +256,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         config = _build_config(config_dict)
 
         # Pipeline ausführen — mit Progress-Updates nach jeder Phase
-        pipeline = EASMPipeline(tenant_id=tenant_id, config=config)
+        pipeline = EASMPipeline(tenant_id=tenant_id, config=config, log_fn=_diag_log)
 
         import datetime as _dt
         _start = _dt.datetime.utcnow()
@@ -1108,6 +1111,14 @@ def _save_report(tenant_id: str, job_id: str, report):
         list(report.subdomains_discovered),
         list(report.open_ports.keys()),
     )
+    resolved_count = sum(1 for v in _ip_map.values() if v)
+    rdap_count = sum(1 for org, _ in _rdap_map.values() if org)
+    logger.info(
+        f"_resolve_assets: {len(_ip_map)} FQDNs, {resolved_count} IPs aufgelöst, "
+        f"{rdap_count} Org/ASN via RDAP"
+    )
+    if not _rdap_map:
+        logger.warning("_resolve_assets: RDAP-Map leer — RIPE/ARIN nicht erreichbar?")
 
     conn = None
     try:

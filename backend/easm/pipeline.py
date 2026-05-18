@@ -122,9 +122,10 @@ class EASMPipeline:
     Jede Phase baut auf den Ergebnissen der vorherigen auf.
     """
 
-    def __init__(self, tenant_id: str, config: PipelineConfig = None):
+    def __init__(self, tenant_id: str, config: PipelineConfig = None, log_fn=None):
         self.tenant_id = tenant_id
         self.config = config or PipelineConfig()
+        self._log = log_fn or (lambda tool, msg, level="info": None)
 
         # Tool-Adapter initialisieren
         self.subfinder = SubfinderAdapter(api_keys=self.config.api_keys)
@@ -212,6 +213,7 @@ class EASMPipeline:
 
     def _phase_discovery(self, report: PipelineReport, domain: str) -> list[ToolFinding]:
         """Phase 1: Parallele Subdomain-Discovery"""
+        from easm.tool_adapters import tool_available
         all_subs = []
 
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -221,7 +223,8 @@ class EASMPipeline:
                 futures[ex.submit(
                     self.subfinder.run,
                     self.tenant_id, domain,
-                    self.config.subfinder_recursive
+                    self.config.subfinder_recursive,
+                    self._log
                 )] = "subfinder"
 
             if self.config.run_theharvester:
@@ -229,7 +232,8 @@ class EASMPipeline:
                     self.harvester.run,
                     self.tenant_id, domain,
                     self.config.theharvester_limit,
-                    self.config.theharvester_full_sources
+                    self.config.theharvester_full_sources,
+                    self._log
                 )] = "theharvester"
 
             for future in as_completed(futures):
@@ -238,7 +242,6 @@ class EASMPipeline:
                     findings = future.result(timeout=self.config.timeout_phase)
                     if tool == "subfinder":
                         report.findings_subfinder = findings
-                        # Subdomain-Liste extrahieren
                         report.subdomains_discovered = [
                             f.affected_asset for f in findings
                             if f.category == "subdomain"
@@ -246,12 +249,11 @@ class EASMPipeline:
                         all_subs.extend([f for f in findings if f.category == "subdomain"])
                     elif tool == "theharvester":
                         report.findings_theharvester = findings
-                        # E-Mail-Liste extrahieren
                         for f in findings:
                             if f.category == "email":
                                 report.emails_harvested = f.raw_data.get("emails", [])
                 except Exception as e:
-                    print(f"  ⚠ {tool} Fehler: {e}")
+                    self._log(tool, f"Phase-Fehler: {e}", "error")
 
         return all_subs
 
@@ -267,7 +269,8 @@ class EASMPipeline:
                 targets=targets,
                 ports=self.config.naabu_ports,
                 rate=self.config.naabu_rate,
-                nmap_integration=self.config.naabu_nmap
+                nmap_integration=self.config.naabu_nmap,
+                log_fn=self._log
             )
             report.findings_naabu = findings
 
@@ -287,7 +290,7 @@ class EASMPipeline:
             return port_map
 
         except Exception as e:
-            print(f"  ⚠ Naabu Fehler: {e}")
+            self._log("naabu", f"Phase-Fehler: {e}", "error")
             return {}
 
     def _identify_mcp_hosts(self, report: PipelineReport) -> list[str]:
@@ -393,11 +396,12 @@ class EASMPipeline:
                 tenant_id=self.tenant_id,
                 urls=targets,
                 take_screenshots=self.config.httpx_screenshots,
-                threads=self.config.httpx_threads
+                threads=self.config.httpx_threads,
+                log_fn=self._log
             )
             report.findings_httpx = findings
         except Exception as e:
-            print(f"  ⚠ HTTPX Fehler: {e}")
+            self._log("httpx", f"Phase-Fehler: {e}", "error")
 
     def _phase_vulnscan(self, report: PipelineReport,
                           targets: list[str], mcp_hosts: list[str]):
@@ -412,19 +416,21 @@ class EASMPipeline:
                 tags=self.config.nuclei_tags,
                 severity_filter=self.config.nuclei_severity,
                 rate_limit=self.config.nuclei_rate,
+                log_fn=self._log
             )
 
             # Separater MCP-Scan wenn MCP-Hosts gefunden
             if mcp_hosts and self.config.run_mcp_scan:
                 mcp_findings = self.nuclei.run_mcp_scan(
                     tenant_id=self.tenant_id,
-                    targets=mcp_hosts
+                    targets=mcp_hosts,
+                    log_fn=self._log
                 )
                 findings.extend(mcp_findings)
 
             report.findings_nuclei = findings
         except Exception as e:
-            print(f"  ⚠ Nuclei Fehler: {e}")
+            self._log("nuclei", f"Phase-Fehler: {e}", "error")
 
     def _phase_mcp(self, report: PipelineReport, mcp_hosts: list[str]):
         """Phase 5: Ramparts MCP-Tiefenanalyse"""
@@ -435,11 +441,12 @@ class EASMPipeline:
             findings = self.ramparts.run(
                 tenant_id=self.tenant_id,
                 mcp_urls=mcp_hosts,
-                use_llm=self.config.ramparts_llm
+                use_llm=self.config.ramparts_llm,
+                log_fn=self._log
             )
             report.findings_ramparts = findings
         except Exception as e:
-            print(f"  ⚠ Ramparts Fehler: {e}")
+            self._log("ramparts", f"Phase-Fehler: {e}", "error")
 
     def _aggregate(self, report: PipelineReport):
         """Alle Findings deduplizieren, priorisieren, Risk-Score berechnen"""
