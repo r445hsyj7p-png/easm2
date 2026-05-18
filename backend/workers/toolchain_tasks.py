@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from celery import Celery
 from celery.schedules import crontab
 from celery.utils.log import get_task_logger
-import json, datetime
+import json, datetime, threading
 
 # ─── Celery App ───────────────────────────────────────────────────────────────
 celery_app = Celery(
@@ -245,8 +245,27 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         """Persist progress_pct so the frontend poll can show real progress."""
         _update_scan_progress(job_id, pct, phase)
 
+    # Log buffer: tool adapters write here from multiple threads; flushed once per
+    # phase via _on_phase so the total DB writes drop from ~50 to ~8 per scan.
+    _log_buf: list = []
+    _log_lock = threading.Lock()
+
     def _diag_log(tool: str, msg: str, level: str = "info"):
-        _log_scan_event(job_id, tool, msg, level)
+        entry = {
+            "t": tool, "msg": msg, "level": level,
+            "ts": datetime.datetime.utcnow().strftime("%H:%M:%S"),
+        }
+        with _log_lock:
+            _log_buf.append(entry)
+
+    def _flush_logs():
+        """Write all buffered log entries to DB in a single batch call."""
+        with _log_lock:
+            if not _log_buf:
+                return
+            events = list(_log_buf)
+            _log_buf.clear()
+        _batch_log_scan_events(job_id, events)
 
     domain    = config_dict.get("domain", "")
     ip_ranges = config_dict.get("ip_ranges", [])
@@ -255,44 +274,45 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         """Progress callback — called by pipeline.run() after each phase."""
         _progress(pct, phase)
         if phase == "starting":
-            _log_scan_event(job_id, "pipeline", f"Scan gestartet für {domain or tenant_id}", "info")
-            _log_scan_event(job_id, "subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}", "info")
+            _diag_log("pipeline", f"Scan gestartet für {domain or tenant_id}")
+            _diag_log("subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}")
         elif phase == "discovery":
             sub_count = len(report.subdomains_discovered)
-            _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains/Domains gefunden", "info")
+            _diag_log("subfinder", f"{sub_count} Subdomains/Domains gefunden")
             email_count = len([f for f in report.findings_theharvester if f.category == "email"])
             if email_count:
-                _log_scan_event(job_id, "theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt", "info")
+                _diag_log("theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt")
         elif phase == "portscan":
             open_ports = report.open_ports or {}
             port_count = sum(len(v) for v in open_ports.values())
-            _log_scan_event(job_id, "naabu",
-                            f"{len(open_ports)} Hosts mit offenen Ports — {port_count} Ports total", "info")
+            _diag_log("naabu",
+                      f"{len(open_ports)} Hosts mit offenen Ports — {port_count} Ports total")
             mcp = report.mcp_servers_found or []
             if mcp:
-                _log_scan_event(job_id, "naabu",
-                                f"MCP-Kandidaten erkannt: {', '.join(list(mcp)[:5])}", "warn")
+                _diag_log("naabu", f"MCP-Kandidaten erkannt: {', '.join(list(mcp)[:5])}", "warn")
         elif phase == "tls":
-            _log_scan_event(job_id, "sslyze",
-                            f"{len(report.findings_sslyze)} TLS-Findings (Protokoll, Cipher, Zertifikat)", "info")
+            _diag_log("sslyze",
+                      f"{len(report.findings_sslyze)} TLS-Findings (Protokoll, Cipher, Zertifikat)")
         elif phase == "http":
-            _log_scan_event(job_id, "httpx", f"{len(report.findings_httpx)} HTTP-Findings", "info")
+            _diag_log("httpx", f"{len(report.findings_httpx)} HTTP-Findings")
         elif phase == "vuln":
-            _log_scan_event(job_id, "nuclei", f"{len(report.findings_nuclei)} Vulnerabilities gefunden", "info")
+            _diag_log("nuclei", f"{len(report.findings_nuclei)} Vulnerabilities gefunden")
             crit_vuln = [f for f in report.findings_nuclei if f.severity == "CRITICAL"]
             if crit_vuln:
-                _log_scan_event(job_id, "nuclei",
-                                f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
+                _diag_log("nuclei",
+                          f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
         elif phase == "mcp":
             mcp_findings = [f for f in report.findings_ramparts + report.findings_naabu
                             if f.category == "mcp_exposure"]
-            _log_scan_event(job_id, "ramparts",
-                            f"{len(mcp_findings)} MCP-Findings",
-                            "info" if not mcp_findings else "warn")
+            _diag_log("ramparts",
+                      f"{len(mcp_findings)} MCP-Findings",
+                      "info" if not mcp_findings else "warn")
         elif phase == "aggregating":
             total = len(report.all_findings)
-            _log_scan_event(job_id, "pipeline",
-                            f"Scan abgeschlossen — {total} Findings, Score: {report.risk_score}", "info")
+            _diag_log("pipeline",
+                      f"Scan abgeschlossen — {total} Findings, Score: {report.risk_score}")
+        # Flush tool-adapter logs accumulated during this phase
+        _flush_logs()
 
     try:
         # Status: Running
@@ -358,6 +378,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
 
     except Exception as exc:
         logger.error(f"[{job_id}] Pipeline FAILED: {exc}")
+        _flush_logs()  # persist any buffered diagnostic logs before marking failed
         _update_scan_status(job_id, "failed", tenant_id, {"error": str(exc)})
         raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
 
@@ -924,6 +945,40 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
         conn.commit()
     except Exception as exc:
         logger.warning(f"_update_scan_progress failed: {exc}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _batch_log_scan_events(job_id: str, events: list) -> None:
+    """Appends a batch of log entries to raw_results->scan_log in one DB write.
+
+    Each event is a dict with keys: t (tool), msg, level, ts.
+    Used by run_full_pipeline to reduce ~50 single-row writes to ~8 batch writes.
+    """
+    import psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url or not job_id or not events:
+        return
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE scan_jobs
+                SET raw_results = jsonb_set(
+                    COALESCE(raw_results, '{}'::jsonb),
+                    '{scan_log}',
+                    COALESCE(raw_results->'scan_log', '[]'::jsonb) || %s::jsonb
+                )
+                WHERE id = %s
+            """, (json.dumps(events), job_id))
+        conn.commit()
+    except Exception as exc:
+        logger.debug(f"_batch_log_scan_events failed: {exc}")
     finally:
         if conn:
             try:

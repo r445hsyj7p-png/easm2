@@ -13,6 +13,7 @@ Tools: Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
 
 import subprocess
 import json
+import logging
 import os
 import re
 import shutil
@@ -428,28 +429,29 @@ class NaabuAdapter:
             except Exception:
                 return False
 
-        for host in hosts:
-            with _TPE(max_workers=30) as ex:
-                futs = {ex.submit(_check, host, p): p for p in COMMON_PORTS}
-                for fut, port in futs.items():
-                    try:
-                        if fut.result(timeout=3):
-                            service = self.SERVICE_MAP.get(port, f"Port {port}")
-                            is_mcp = port in self.MCP_PORTS
-                            sev = ("CRITICAL" if port in self.CRITICAL_PORTS
-                                   else "HIGH" if port in self.HIGH_PORTS or is_mcp
-                                   else "MEDIUM")
-                            findings.append(ToolFinding(
-                                tenant_id=tenant_id, tool="naabu",
-                                category="mcp_exposure" if is_mcp else "port",
-                                severity=sev,
-                                title=f"{service} exponiert: {host}:{port}",
-                                description=f"Port {port} ({service}) auf {host} ist offen.",
-                                affected_asset=f"{host}:{port}",
-                                raw_data={"ip": host, "port": port},
-                            ))
-                    except Exception:
-                        pass
+        pairs = [(h, p) for h in hosts for p in COMMON_PORTS]
+        n_workers = min(50, len(pairs))
+        with _TPE(max_workers=n_workers) as ex:
+            futs = {ex.submit(_check, h, p): (h, p) for h, p in pairs}
+            for fut, (host, port) in futs.items():
+                try:
+                    if fut.result(timeout=3):
+                        service = self.SERVICE_MAP.get(port, f"Port {port}")
+                        is_mcp = port in self.MCP_PORTS
+                        sev = ("CRITICAL" if port in self.CRITICAL_PORTS
+                               else "HIGH" if port in self.HIGH_PORTS or is_mcp
+                               else "MEDIUM")
+                        findings.append(ToolFinding(
+                            tenant_id=tenant_id, tool="naabu",
+                            category="mcp_exposure" if is_mcp else "port",
+                            severity=sev,
+                            title=f"{service} exponiert: {host}:{port}",
+                            description=f"Port {port} ({service}) auf {host} ist offen.",
+                            affected_asset=f"{host}:{port}",
+                            raw_data={"ip": host, "port": port},
+                        ))
+                except Exception:
+                    pass
         if log_fn:
             log_fn("naabu", f"Python TCP-Fallback: {len(findings)} offene Ports auf {len(hosts)} Hosts", "info")
         return findings
@@ -583,6 +585,8 @@ class TheHarvesterAdapter:
                 "-b", sources,
                 "-l", str(limit),
                 "-f", output_file.replace(".json", ""),
+                # --dns-lookup omitted: removed in theHarvester 4.6+ (DNS resolution
+                # now happens automatically per-source, flag no longer accepted)
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
@@ -944,6 +948,8 @@ class NucleiAdapter:
     - misconfigs/   → Fehlkonfigurationen
     """
 
+    _logger = logging.getLogger("easm.nuclei")
+
     def __init__(self):
         self.binary = "nuclei"
 
@@ -1288,10 +1294,8 @@ class NucleiAdapter:
 
     def _parse(self, tenant_id: str, stdout: str,  # NucleiAdapter
                stderr: str, rc: int) -> list[ToolFinding]:
-        import logging as _log
-        _nlog = _log.getLogger("easm.nuclei")
         if rc < 0 or (rc != 0 and not stdout.strip()):
-            _nlog.warning("nuclei rc=%d no-stdout stderr=%s", rc, stderr[:300])
+            self._logger.warning("nuclei rc=%d no-stdout stderr=%s", rc, stderr[:300])
         findings = []
         for line in stdout.strip().splitlines():
             if not line.strip():
