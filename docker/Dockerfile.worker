@@ -54,8 +54,10 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     chmod +x /usr/local/bin/naabu && \
     rm -rf /tmp/subfinder* /tmp/httpx* /tmp/naabu*
 
-# theHarvester — OSINT tool (Python CLI, installed via pip)
-RUN pip install --no-cache-dir theHarvester || echo "theHarvester install failed, skipping"
+# theHarvester — OSINT tool (real tool from GitHub, not the PyPI stub v0.0.1)
+RUN pip install --no-cache-dir \
+    "git+https://github.com/laramies/theHarvester.git@master" \
+    || echo "theHarvester install failed, skipping"
 
 # Python dependencies
 WORKDIR /app

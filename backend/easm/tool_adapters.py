@@ -754,10 +754,9 @@ class HTTPXAdapter:
                 "-web-server",           # Server-Header
                 "-cdn",                  # CDN-Erkennung
                 "-tls-probe",            # TLS-Info
-                "-hash", "sha256",       # Content-Hash für Änderungs-Detection
+                "-hash", "sha256",       # Content-Hash
                 "-favicon",              # Favicon-Hash
-                "-response-in-json",     # Body in JSON (limitiert)
-                "-include-response-header",
+                "-timeout", "10",        # Verbindungs-Timeout pro Host
             ]
 
             if take_screenshots and (shutil.which("chromium") or shutil.which("google-chrome")):
