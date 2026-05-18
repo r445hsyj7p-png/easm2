@@ -264,11 +264,12 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             panos_ver = config_dict.get("panos_version", "")
 
             from easm.pipeline import PipelineReport
+            _scan_start_ts = _dt.datetime.utcnow()
             report = PipelineReport(
                 tenant_id=tenant_id,
                 domain=domain,
                 ip_ranges=ip_ranges,
-                scan_start=_dt.datetime.utcnow().isoformat(),
+                scan_start=_scan_start_ts.isoformat(),
             )
 
             _progress(5, "discovery")
@@ -300,7 +301,7 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
 
             end_ts = _dt.datetime.utcnow()
             report.scan_end = end_ts.isoformat()
-            report.duration_seconds = int((end_ts - _dt.datetime.fromisoformat(report.scan_start)).total_seconds())
+            report.duration_seconds = int((end_ts - _scan_start_ts).total_seconds())
             pipeline._print_summary(report)
             return report
 

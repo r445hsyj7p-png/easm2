@@ -47,10 +47,6 @@ const ALL_PHASES = [
   { key:"mcp",       label:"MCP Analysis", tool:"ramparts + handshake",     color:T.high,       pct:[88,99] },
 ];
 
-// Map backend phase name → index
-const PHASE_NAME_TO_IDX = {
-  starting:0, discovery:0, portscan:1, tls:2, http:3, vuln:4, mcp:5, aggregating:5, saving:5,
-};
 
 const SCAN_LOG = [
   { t:"subfinder",    msg:"loading passive sources: VirusTotal, Shodan, Censys, SecurityTrails, DNSdumpster...", c:"cyan",   phase:"discovery" },
@@ -130,10 +126,14 @@ const ScansTab = () => {
   const elapsed = useElapsed(scanStartedAt);
 
   // Derived display values
-  const realPct    = scanStatus?.progress_pct ?? 0;
-  const realPhase  = PHASE_NAME_TO_IDX[scanStatus?.current_phase] ?? -1;
+  const realPct = scanStatus?.progress_pct ?? 0;
   const displayPct = realPct;
-  const displayPhaseIdx = cosmeticPhase >= 0 ? cosmeticPhase : realPhase;
+
+  // Map backend current_phase name → local index in activePhases
+  // (current_phase is a key like "discovery","portscan" etc. — look it up directly)
+  const activePhaseKeys = ALL_PHASES.filter(ph => selected[ph.key]).map(ph => ph.key);
+  const realPhaseLocalIdx = activePhaseKeys.indexOf(scanStatus?.current_phase ?? "");
+  const displayPhaseIdx = cosmeticPhase >= 0 ? cosmeticPhase : realPhaseLocalIdx;
 
   const isActive   = scanStatus?.status === "running" || scanStatus?.status === "pending";
   const isDone     = scanStatus?.status === "completed";
