@@ -541,12 +541,34 @@ class TheHarvesterAdapter:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             output_file = tf.name
 
-        _avail = tool_available("theHarvester")
+        # Try binary first, then python -m theHarvester as module fallback
+        _binary_avail = tool_available("theHarvester")
+        _module_avail = False
+        if not _binary_avail:
+            try:
+                import subprocess as _sp
+                _r = _sp.run(
+                    ["python", "-m", "theHarvester", "--help"],
+                    capture_output=True, timeout=10
+                )
+                _module_avail = _r.returncode == 0
+            except Exception:
+                pass
+
+        _avail = _binary_avail or _module_avail
+        _invoke = (["theHarvester"] if _binary_avail
+                   else ["python", "-m", "theHarvester"] if _module_avail
+                   else None)
+
         if log_fn:
-            log_fn("theharvester", f"binary {'verfügbar' if _avail else 'NICHT gefunden — übersprungen'}", "info" if _avail else "warn")
+            if _binary_avail:
+                log_fn("theharvester", "binary verfügbar", "info")
+            elif _module_avail:
+                log_fn("theharvester", "binary nicht gefunden, nutze python -m theHarvester", "warn")
+            else:
+                log_fn("theharvester", "binary NICHT gefunden und python-Modul nicht verfügbar — übersprungen", "warn")
 
         if not _avail:
-            # Clean up the temp file and return empty — no fallback for theHarvester
             try:
                 os.unlink(output_file)
             except Exception:
@@ -554,12 +576,11 @@ class TheHarvesterAdapter:
             return []
 
         try:
-            cmd = [
-                "theHarvester",
+            cmd = _invoke + [
                 "-d", domain,
                 "-b", sources,
                 "-l", str(limit),
-                "-f", output_file.replace(".json", ""),  # theHarvester fügt .json hinzu
+                "-f", output_file.replace(".json", ""),
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
