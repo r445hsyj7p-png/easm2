@@ -341,15 +341,21 @@ class EASMPipeline:
         return targets
 
     def _phase_tls(self, report: PipelineReport, targets: list[dict]):
-        """Phase 3: TLS-Scan via SSLyze"""
+        """Phase 3: TLS-Scan via SSLyze — alle Targets parallel"""
         if not self.config.run_sslyze or not targets:
             return
         try:
             from workers.sslyze_task import _scan_target
             findings_raw = []
-            for t in targets:
-                findings_raw.extend(_scan_target(t["host"], t["port"]))
-            # Convert raw dicts to ToolFinding objects
+            with ThreadPoolExecutor(max_workers=min(20, len(targets))) as ex:
+                futures = {ex.submit(_scan_target, t["host"], t["port"]): t
+                           for t in targets}
+                for fut in as_completed(futures):
+                    try:
+                        findings_raw.extend(fut.result())
+                    except Exception as e:
+                        t = futures[fut]
+                        print(f"  ⚠ SSLyze {t['host']}:{t['port']}: {e}")
             tls_findings = []
             for raw in findings_raw:
                 tls_findings.append(ToolFinding(
