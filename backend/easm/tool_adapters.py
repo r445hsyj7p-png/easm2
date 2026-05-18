@@ -812,7 +812,7 @@ class NucleiAdapter:
     def run(self, tenant_id: str, targets: list[str],
             template_dirs: list[str] = None,
             tags: str = None,
-            severity_filter: str = "low,medium,high,critical",
+            severity_filter: str = "info,low,medium,high,critical",
             rate_limit: int = 100,
             bulk_size: int = 25) -> list[ToolFinding]:
         """
@@ -853,8 +853,11 @@ class NucleiAdapter:
             if tags:
                 cmd += ["-tags", tags]
 
-            # Disable auto-update check so nuclei doesn't try to update during scan
-            cmd += ["-duc"]
+            # Only disable update check if templates already exist locally
+            _home = os.path.expanduser("~")
+            _tmpl_dir = os.path.join(_home, "nuclei-templates")
+            if os.path.isdir(_tmpl_dir) and any(os.scandir(_tmpl_dir)):
+                cmd += ["-duc"]
 
             if not tool_available(self.binary):
                 return self._run_docker(tenant_id, targets, tags, severity_filter)
