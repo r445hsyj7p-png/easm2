@@ -275,10 +275,14 @@ class EASMPipeline:
             port_map = {}
             for f in findings:
                 if ":" in f.affected_asset:
-                    host, port = f.affected_asset.rsplit(":", 1)
+                    host, port_str = f.affected_asset.rsplit(":", 1)
+                    try:
+                        port_int = int(port_str)
+                    except (ValueError, TypeError):
+                        continue
                     if host not in port_map:
                         port_map[host] = []
-                    port_map[host].append(int(port))
+                    port_map[host].append(port_int)
             report.open_ports = port_map
             return port_map
 

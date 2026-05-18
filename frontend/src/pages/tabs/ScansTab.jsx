@@ -7,7 +7,7 @@ import { useApp } from "../../context/AppContext";
 const ScanTimeline = ({ scans }) => (
   <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
     {scans.map((s,i) => (
-      <div key={i} style={{ display:"flex", gap:10, position:"relative" }}>
+      <div key={s.id || i} style={{ display:"flex", gap:10, position:"relative" }}>
         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:16 }}>
           {s.status==="completed" ? <CheckCircle size={12} color={T.accent} style={{ flexShrink:0, marginTop:2 }} /> :
            s.status==="running"   ? <Loader2    size={12} color={T.accent} style={{ flexShrink:0, marginTop:2, animation:"spin 1s linear infinite" }} /> :
@@ -83,6 +83,7 @@ const DEFAULT_SELECTED = { discovery:true, portscan:true, tls:true, http:true, v
 const ScansTab = () => {
   const { tenant, triggerScan, scans } = useApp();
   const mappedScans = (Array.isArray(scans) ? scans : []).slice(0, 10).map(s => ({
+    id: s.id,
     label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace(/_/g, " ")} Scan`,
     status: s.status || "pending",
     time: s.duration_seconds ? `${s.duration_seconds}s` : "—",
@@ -195,7 +196,7 @@ const ScansTab = () => {
             <div>
               <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:14, fontWeight:600, color:T.text0 }}>Scan Pipeline</div>
               <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginTop:3 }}>
-                {tenant?.slug || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
+                {tenant?.domain || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
               </div>
             </div>
             <button onClick={startScan} disabled={running || activePhases.length === 0} style={{

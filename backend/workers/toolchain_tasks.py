@@ -231,7 +231,8 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
     """
     from easm.pipeline import EASMPipeline, PipelineConfig
 
-    job_id = self.request.id
+    # Use the DB scan_job id passed via config_dict, falling back to Celery task id
+    job_id = config_dict.get("scan_id") or self.request.id
     logger.info(f"[{job_id}] [req={request_id}] Pipeline START: tenant={tenant_id}")
 
     # Load tenant domain from DB (config_dict from API only has scan_id + scan_type)
@@ -900,6 +901,8 @@ def _save_report(tenant_id: str, job_id: str, report):
                 saved_assets += 1
 
             for host, ports in report.open_ports.items():
+                port_list = [int(p) for p in ports
+                             if isinstance(p, int) or (isinstance(p, str) and p.isdigit())]
                 cur.execute("""
                     INSERT INTO assets
                         (id, tenant_id, fqdn, ip, org, asn,
@@ -908,10 +911,10 @@ def _save_report(tenant_id: str, job_id: str, report):
                     VALUES
                         (gen_random_uuid()::text, %s, %s,
                          NULL, NULL, NULL,
-                         %s, 'MEDIUM', ARRAY['naabu'], FALSE, '[]',
+                         %s::integer[], 'MEDIUM', ARRAY['naabu'], FALSE, '[]',
                          NOW(), NOW())
                     ON CONFLICT DO NOTHING
-                """, (tenant_id, host, ports))
+                """, (tenant_id, host, port_list))
                 saved_assets += 1
 
             # ── MCP Servers ────────────────────────────────────────────

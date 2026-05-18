@@ -394,9 +394,11 @@ async def create_scan_job(
         )
         RETURNING id
     """), {"tid": tenant_id, "type": scan_type, "by": triggered_by})
-    scan_id = r.scalar()  # fetch before commit — cursor closed after commit
+    row = r.fetchone()  # fetch before commit — cursor closed after commit
     await db.commit()
-    return scan_id
+    if not row:
+        raise RuntimeError(f"Scan-Job konnte nicht erstellt werden für Mandant {tenant_id}")
+    return str(row[0])
 
 
 # ─── Users ───────────────────────────────────────────────────────────────────
