@@ -1026,6 +1026,57 @@ def _save_report(tenant_id: str, job_id: str, report):
                 json.dumps(by_sev),
             ))
 
+            # ── Intel Snapshot (Hosting Analysis + FQDN Inventory) ────
+            cur.execute("""
+                SELECT fqdn, ip::text, org, asn, risk
+                FROM assets WHERE tenant_id = %s
+                ORDER BY risk, fqdn NULLS LAST
+            """, (tenant_id,))
+            asset_rows = cur.fetchall()
+
+            # FQDN table
+            fqdn_table = [
+                {
+                    "fqdn":    r[0] or "—",
+                    "ip":      r[1] or "—",
+                    "org":     r[2] or "—",
+                    "asn":     r[3] or 0,
+                    "netblock": "—",
+                    "country": "—",
+                    "risk":    r[4] or "LOW",
+                }
+                for r in asset_rows if r[0] or r[1]
+            ]
+
+            # Hosting orgs aggregation
+            from collections import Counter as _Counter
+            org_counts = _Counter(
+                r[2] for r in asset_rows if r[2]
+            )
+            total_assets = len(asset_rows) or 1
+            _palette = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6",
+                        "#06b6d4", "#f97316", "#a855f7", "#14b8a6", "#ef4444"]
+            hosting_orgs = [
+                {
+                    "name":  org,
+                    "count": cnt,
+                    "pct":   round(cnt / total_assets * 100, 1),
+                    "asn":   0,
+                    "color": _palette[i % len(_palette)],
+                }
+                for i, (org, cnt) in enumerate(org_counts.most_common(10))
+            ]
+
+            intel_data = {
+                "hosting_orgs": hosting_orgs,
+                "fqdn_table":   fqdn_table,
+                "geo_assets":   [],
+            }
+            cur.execute("""
+                INSERT INTO intel_snapshots (id, tenant_id, data, created_at)
+                VALUES (gen_random_uuid()::text, %s, %s::jsonb, NOW())
+            """, (tenant_id, json.dumps(intel_data)))
+
         conn.commit()
         conn.close()
         logger.info(
