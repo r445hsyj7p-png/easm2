@@ -848,7 +848,8 @@ class NucleiAdapter:
             tags: str = None,
             severity_filter: str = "info,low,medium,high,critical",
             rate_limit: int = 100,
-            bulk_size: int = 25) -> list[ToolFinding]:
+            bulk_size: int = 25,
+            log_fn=None) -> list[ToolFinding]:
         """
         Args:
             targets: URLs oder IPs
@@ -857,7 +858,16 @@ class NucleiAdapter:
             severity_filter: Nur diese Schweregrade
             rate_limit: Requests/Sekunde
             bulk_size: Parallele Targets
+            log_fn: Optionale Log-Funktion (tool, msg, level)
         """
+        _avail = tool_available(self.binary)
+        if log_fn:
+            _home = os.path.expanduser("~")
+            _tmpl_dir = os.path.join(_home, "nuclei-templates")
+            _tmpl_exists = os.path.isdir(_tmpl_dir)
+            _tmpl_count = sum(1 for _ in Path(_tmpl_dir).rglob("*.yaml")) if _tmpl_exists else 0
+            log_fn("nuclei", f"binary {'verfügbar' if _avail else 'NICHT gefunden'} | templates: {_tmpl_count} .yaml Dateien in {_tmpl_dir}", "info" if _avail else "error")
+
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
                                           delete=False) as tf:
             tf.write("\n".join(targets))
@@ -869,7 +879,7 @@ class NucleiAdapter:
                 tags = "api,exposure,misconfig,default-login,mcp"
 
             cmd = [
-                self.binary if tool_available(self.binary) else "nuclei",
+                self.binary if _avail else "nuclei",
                 "-l", target_file,
                 "-json",
                 "-silent",
@@ -893,16 +903,28 @@ class NucleiAdapter:
             if os.path.isdir(_tmpl_dir) and any(os.scandir(_tmpl_dir)):
                 cmd += ["-duc"]
 
-            if not tool_available(self.binary):
+            if not _avail:
                 return self._run_docker(tenant_id, targets, tags, severity_filter)
 
             rc, stdout, stderr = _run(cmd, timeout=900)
-            return self._parse(tenant_id, stdout, stderr, rc)
+            findings = self._parse(tenant_id, stdout, stderr, rc)
+            if log_fn:
+                stderr_short = (stderr or "").strip()[:300]
+                stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
+                cmd_str = " ".join(str(c) for c in cmd[:12])
+                if rc != 0 and not stdout.strip():
+                    log_fn("nuclei", f"rc={rc} FEHLER — keine Ausgabe | stderr: {stderr_short}", "error")
+                    log_fn("nuclei", f"cmd: {cmd_str}", "warn")
+                elif rc != 0:
+                    log_fn("nuclei", f"rc={rc} (non-zero aber {stdout_lines} Findings-Zeilen) | stderr: {stderr_short[:100]}", "warn")
+                else:
+                    log_fn("nuclei", f"rc=0 | {stdout_lines} JSON-Zeilen → {len(findings)} Findings geparst", "info")
+            return findings
 
         finally:
             os.unlink(target_file)
 
-    def run_mcp_scan(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
+    def run_mcp_scan(self, tenant_id: str, targets: list[str], log_fn=None) -> list[ToolFinding]:
         """Spezialisierter MCP-Scan mit MCP-spezifischen Templates"""
         mcp_targets = []
         for t in targets:
@@ -919,6 +941,7 @@ class NucleiAdapter:
             targets=mcp_targets + targets,
             tags=self.MCP_TAGS + ",api,exposure",
             severity_filter="low,medium,high,critical",
+            log_fn=log_fn,
         )
 
         # Zusätzlich: manuelle MCP-Handshake-Checks
@@ -1115,21 +1138,29 @@ class RampartsAdapter:
     ]
 
     def run(self, tenant_id: str, mcp_urls: list[str],
-            use_llm: bool = False) -> list[ToolFinding]:
+            use_llm: bool = False, log_fn=None) -> list[ToolFinding]:
         """
         Args:
             mcp_urls: Liste von MCP-Server-URLs
             use_llm: LLM-gestützte Analyse (braucht API-Key)
+            log_fn: Optionale Log-Funktion (tool, msg, level)
         """
+        _avail = tool_available("ramparts")
+        if log_fn:
+            log_fn("ramparts", f"binary {'verfügbar' if _avail else 'NICHT gefunden — eigene MCP-Analyse'} | {len(mcp_urls)} URLs", "info" if _avail else "warn")
+
         all_findings = []
 
         for url in mcp_urls:
             # Primär: ramparts CLI wenn installiert
-            if tool_available("ramparts"):
+            if _avail:
                 all_findings += self._run_ramparts_cli(tenant_id, url, use_llm)
             else:
                 # Fallback: Eigene MCP-Security-Analyse
                 all_findings += self._run_own_analysis(tenant_id, url)
+
+        if log_fn:
+            log_fn("ramparts", f"{len(all_findings)} MCP-Findings aus {len(mcp_urls)} URLs", "info" if not all_findings else "warn")
 
         return all_findings
 
