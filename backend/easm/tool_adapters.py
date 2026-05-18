@@ -562,11 +562,13 @@ class TheHarvesterAdapter:
 
         if log_fn:
             if _binary_avail:
-                log_fn("theharvester", "binary verfügbar", "info")
+                log_fn("theharvester", "binary verfügbar (/usr/local/bin/theHarvester)", "info")
             elif _module_avail:
                 log_fn("theharvester", "binary nicht gefunden, nutze python -m theHarvester", "warn")
             else:
-                log_fn("theharvester", "binary NICHT gefunden und python-Modul nicht verfügbar — übersprungen", "warn")
+                log_fn("theharvester",
+                       "binary NICHT gefunden — Worker-Image neu bauen (git fehlte beim letzten Build)",
+                       "warn")
 
         if not _avail:
             try:
