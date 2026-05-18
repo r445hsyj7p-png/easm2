@@ -248,9 +248,17 @@ const ScansTab = () => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
+  // findings_count may be a JSONB object {LOW,HIGH,...} from older rows — normalize to int
+  const findingsCount = (() => {
+    const fc = scanStatus?.findings_count;
+    if (fc == null) return "—";
+    if (typeof fc === "object") return Object.values(fc).reduce((a, b) => a + (Number(b) || 0), 0);
+    return fc;
+  })();
+
   // Status-bar text
   const statusText = () => {
-    if (isDone)  return `✓ Abgeschlossen · ${scanStatus?.findings_count ?? "—"} Findings · Score: ${scanStatus?.risk_score ?? "—"}`;
+    if (isDone)  return `✓ Abgeschlossen · ${findingsCount} Findings · Score: ${scanStatus?.risk_score ?? "—"}`;
     if (isError) return `✗ Fehler: ${scanStatus?.error_message || "Unbekannt"}`;
     if (isActive) {
       const phaseName = scanStatus?.current_phase || "";
@@ -374,8 +382,8 @@ const ScansTab = () => {
             <div style={{ marginTop:12, display:"flex", gap:16, padding:"10px 14px",
               background:T.bg3, border:`1px solid ${T.accent}22`, borderRadius:4 }}>
               {[
-                ["findings",      scanStatus.findings_count ?? "—"],
-                ["risk score",    scanStatus.risk_score     ?? "—"],
+                ["findings",      findingsCount],
+                ["risk score",    scanStatus.risk_score ?? "—"],
                 ["duration",      scanStatus.duration_seconds ? `${scanStatus.duration_seconds}s` : "—"],
               ].map(([label, val]) => (
                 <div key={label}>

@@ -578,7 +578,11 @@ async def get_scan(
     ctx.assert_own_tenant(tenant_id)
     from sqlalchemy import text
     r = await db.execute(text("""
-        SELECT id, scan_type, status, findings_count,
+        SELECT id, scan_type, status,
+               COALESCE((findings_count->>'CRITICAL')::int, 0) +
+               COALESCE((findings_count->>'HIGH')::int,     0) +
+               COALESCE((findings_count->>'MEDIUM')::int,   0) +
+               COALESCE((findings_count->>'LOW')::int,      0) AS findings_count,
                risk_score_after AS risk_score,
                created_at AS started_at, completed_at AS finished_at,
                duration_seconds, error_message,
