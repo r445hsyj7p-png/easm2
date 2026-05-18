@@ -31,14 +31,14 @@ if [ ! -f "$STAMP_FILE" ] || [ "$(find "$STAMP_FILE" -mtime +1 2>/dev/null)" ]; 
 fi
 
 # Verify templates were actually downloaded
-TMPL_COUNT=$(find "${TEMPLATES_DIR}" -name "*.yaml" 2>/dev/null | wc -l || echo 0)
+TMPL_COUNT=$(find "${TEMPLATES_DIR}" -name "*.yaml" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 if [ "$TMPL_COUNT" -eq 0 ]; then
     echo "[entrypoint] WARNUNG: Keine Templates in ${TEMPLATES_DIR} — versuche nuclei ohne -ud..."
     nuclei -update-templates 2>&1 || true
 fi
 
 # Log template count for diagnostics
-TMPL_COUNT=$(find "${TEMPLATES_DIR}" -name "*.yaml" 2>/dev/null | wc -l || echo 0)
+TMPL_COUNT=$(find "${TEMPLATES_DIR}" -name "*.yaml" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 echo "[entrypoint] Nuclei-Templates: ${TMPL_COUNT} .yaml Dateien in ${TEMPLATES_DIR}"
 
 # ── Tool-Verfügbarkeit prüfen ─────────────────────────────────────────────────
