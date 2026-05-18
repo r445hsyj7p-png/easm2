@@ -39,7 +39,7 @@ function LoadingScreen() {
           <path d="M12 2L3 7v5c0 5.5 3.8 10.7 9 12 5.2-1.3 9-6.5 9-12V7L12 2z"/>
         </svg>
       </div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#273548",
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#94a3b8",
         letterSpacing: "0.1em" }}>LADEN...</div>
     </div>
   );
