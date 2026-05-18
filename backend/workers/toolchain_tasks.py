@@ -241,9 +241,19 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         tenant_info = _get_tenant_info(tenant_id)
         config_dict = {**config_dict, **tenant_info}
 
+    # Single shared connection for all progress writes (~8 per scan).
+    import psycopg2 as _pg
+    _prog_conn: object = None
+    try:
+        _db_url = os.getenv("DATABASE_URL", "")
+        if _db_url:
+            _prog_conn = _pg.connect(_db_url)
+    except Exception:
+        _prog_conn = None
+
     def _progress(pct: int, phase: str = ""):
         """Persist progress_pct so the frontend poll can show real progress."""
-        _update_scan_progress(job_id, pct, phase)
+        _update_scan_progress(job_id, pct, phase, conn=_prog_conn)
 
     # Log buffer: tool adapters write here from multiple threads; flushed once per
     # phase via _on_phase so the total DB writes drop from ~50 to ~8 per scan.
@@ -381,6 +391,13 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
         _flush_logs()  # persist any buffered diagnostic logs before marking failed
         _update_scan_status(job_id, "failed", tenant_id, {"error": str(exc)})
         raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
+
+    finally:
+        if _prog_conn:
+            try:
+                _prog_conn.close()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -919,15 +936,21 @@ def _update_scan_status(job_id: str, status: str,
                 pass
 
 
-def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
-    """Updates progress_pct in raw_results so the frontend poll sees real progress."""
+def _update_scan_progress(job_id: str, pct: int, phase: str = "", conn=None):
+    """Updates progress_pct in raw_results so the frontend poll sees real progress.
+
+    Pass an open psycopg2 connection as *conn* to avoid reopening the DB
+    connection on every call (e.g. once per phase inside run_full_pipeline).
+    When *conn* is None a fresh connection is opened and closed automatically.
+    """
     import psycopg2
     db_url = os.getenv("DATABASE_URL", "")
     if not db_url:
         return
-    conn = None
+    _own_conn = conn is None
     try:
-        conn = psycopg2.connect(db_url)
+        if _own_conn:
+            conn = psycopg2.connect(db_url)
         with conn.cursor() as cur:
             # Use jsonb_set per key instead of || so scan_log (and other keys
             # written by concurrent _log_scan_event calls) are never overwritten.
@@ -946,7 +969,7 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
     except Exception as exc:
         logger.warning(f"_update_scan_progress failed: {exc}")
     finally:
-        if conn:
+        if _own_conn and conn:
             try:
                 conn.close()
             except Exception:

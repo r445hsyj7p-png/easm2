@@ -430,7 +430,7 @@ class NaabuAdapter:
                 return False
 
         pairs = [(h, p) for h in hosts for p in COMMON_PORTS]
-        n_workers = min(50, len(pairs))
+        n_workers = max(1, min(50, len(pairs)))
         with _TPE(max_workers=n_workers) as ex:
             futs = {ex.submit(_check, h, p): (h, p) for h, p in pairs}
             for fut, (host, port) in futs.items():
