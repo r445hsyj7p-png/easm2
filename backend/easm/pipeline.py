@@ -15,7 +15,6 @@ Verwendung:
     report = await pipeline.run(domain="example.de", ip_ranges=["203.0.113.0/24"])
 """
 
-import asyncio
 import json
 import hashlib
 import datetime
@@ -23,7 +22,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from adapters.tool_adapters import (
+from easm.tool_adapters import (
     SubfinderAdapter, NaabuAdapter, TheHarvesterAdapter,
     HTTPXAdapter, NucleiAdapter, RampartsAdapter, ToolFinding
 )
@@ -47,6 +46,7 @@ class PipelineConfig:
     run_subfinder: bool = True
     run_naabu: bool = True
     run_theharvester: bool = True
+    run_sslyze: bool = True
     run_httpx: bool = True
     run_nuclei: bool = True
     run_ramparts: bool = True
@@ -97,6 +97,7 @@ class PipelineReport:
     findings_subfinder: list = field(default_factory=list)
     findings_naabu: list = field(default_factory=list)
     findings_theharvester: list = field(default_factory=list)
+    findings_sslyze: list = field(default_factory=list)
     findings_httpx: list = field(default_factory=list)
     findings_nuclei: list = field(default_factory=list)
     findings_ramparts: list = field(default_factory=list)
@@ -171,25 +172,31 @@ class EASMPipeline:
         print(f"  → {sum(len(p) for p in open_ports.values())} offene Ports")
         print(f"  → {len(mcp_hosts)} mögliche MCP-Server-Hosts")
 
-        # ── Phase 3: HTTP-Probing (HTTPX) ─────────────────────────────────────
-        print("[Phase 3/5] HTTP-Probing & Fingerprinting...")
+        # ── Phase 3: TLS-Scan (SSLyze) ────────────────────────────────────────
+        print("[Phase 3/6] TLS-Scanning...")
+        tls_targets = self._build_tls_targets(open_ports, subdomains)
+        self._phase_tls(report, tls_targets)
+        print(f"  → {len(report.findings_sslyze)} TLS-Findings")
+
+        # ── Phase 4: HTTP-Probing (HTTPX) ─────────────────────────────────────
+        print("[Phase 4/6] HTTP-Probing & Fingerprinting...")
         http_targets = self._build_http_targets(open_ports, subdomains)
         self._phase_http(report, http_targets)
         print(f"  → {len(report.findings_httpx)} HTTP-Findings")
 
-        # ── Phase 4: Vulnerability-Scan (Nuclei) ──────────────────────────────
-        print("[Phase 4/5] Vulnerability-Scanning...")
+        # ── Phase 5: Vulnerability-Scan (Nuclei) ──────────────────────────────
+        print("[Phase 5/6] Vulnerability-Scanning...")
         vuln_targets = list(set(http_targets + mcp_hosts))
         self._phase_vulnscan(report, vuln_targets, mcp_hosts)
         print(f"  → {len(report.findings_nuclei)} Nuclei-Findings")
 
-        # ── Phase 5: MCP-Tiefenanalyse (Ramparts) ────────────────────────────
+        # ── Phase 6: MCP-Tiefenanalyse (Ramparts) ────────────────────────────
         if mcp_hosts and self.config.run_ramparts:
-            print("[Phase 5/5] MCP-Tiefenanalyse...")
+            print("[Phase 6/6] MCP-Tiefenanalyse...")
             self._phase_mcp(report, mcp_hosts)
             print(f"  → {len(report.findings_ramparts)} MCP-Findings")
         else:
-            print("[Phase 5/5] MCP-Analyse übersprungen (keine MCP-Hosts)")
+            print("[Phase 6/6] MCP-Analyse übersprungen (keine MCP-Hosts)")
 
         # ── Aggregation + Deduplication ───────────────────────────────────────
         print("\n[Aggregation] Deduplizierung & Risk-Scoring...")
@@ -304,6 +311,53 @@ class EASMPipeline:
         report.mcp_servers_found = list(set(mcp_hosts))
         return report.mcp_servers_found
 
+    def _build_tls_targets(self, open_ports: dict,
+                            subdomains: list[ToolFinding]) -> list[dict]:
+        """Baut TLS-Target-Liste: [(host, port), ...] für bekannte HTTPS-Ports"""
+        HTTPS_PORTS = {443, 8443, 9443, 4443, 5986, 6443, 8200}
+        targets = []
+        seen = set()
+        for host, ports in open_ports.items():
+            for port in ports:
+                if port in HTTPS_PORTS:
+                    key = (host, port)
+                    if key not in seen:
+                        seen.add(key)
+                        targets.append({"host": host, "port": port})
+        # Subdomains auf Port 443
+        for sub in subdomains:
+            key = (sub.affected_asset, 443)
+            if key not in seen:
+                seen.add(key)
+                targets.append({"host": sub.affected_asset, "port": 443})
+        return targets
+
+    def _phase_tls(self, report: PipelineReport, targets: list[dict]):
+        """Phase 3: TLS-Scan via SSLyze"""
+        if not self.config.run_sslyze or not targets:
+            return
+        try:
+            from workers.sslyze_task import _scan_target
+            findings_raw = []
+            for t in targets:
+                findings_raw.extend(_scan_target(t["host"], t["port"]))
+            # Convert raw dicts to ToolFinding objects
+            tls_findings = []
+            for raw in findings_raw:
+                tls_findings.append(ToolFinding(
+                    tenant_id=self.tenant_id,
+                    tool="sslyze",
+                    category=raw.get("category", "tls"),
+                    severity=raw.get("severity", "INFO"),
+                    title=raw.get("title", "TLS Issue"),
+                    description=raw.get("description", ""),
+                    affected_asset=raw.get("affected_asset", ""),
+                    raw_data=raw,
+                ))
+            report.findings_sslyze = tls_findings
+        except Exception as e:
+            print(f"  ⚠ SSLyze Fehler: {e}")
+
     def _build_http_targets(self, open_ports: dict,
                              subdomains: list[ToolFinding]) -> list[str]:
         """Baut HTTP-Target-Liste aus Port-Scan-Ergebnissen"""
@@ -388,6 +442,7 @@ class EASMPipeline:
             report.findings_subfinder +
             report.findings_naabu +
             report.findings_theharvester +
+            report.findings_sslyze +
             report.findings_httpx +
             report.findings_nuclei +
             report.findings_ramparts
@@ -437,7 +492,7 @@ class EASMPipeline:
             "by_tool": {
                 tool: sum(1 for f in unique if f.tool == tool)
                 for tool in ["subfinder", "naabu", "theharvester",
-                             "httpx", "nuclei", "ramparts"]
+                             "sslyze", "httpx", "nuclei", "ramparts"]
             },
             "by_category": {
                 cat: sum(1 for f in unique if f.category == cat)
