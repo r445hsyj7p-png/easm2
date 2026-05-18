@@ -38,6 +38,8 @@ RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.3.1 && \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# ramparts is worker-only and may not be on PyPI — install best-effort
+RUN pip install --no-cache-dir ramparts || echo "ramparts not available on PyPI, skipping"
 
 # App code
 COPY . .
