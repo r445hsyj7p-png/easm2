@@ -1008,7 +1008,8 @@ class NucleiAdapter:
         try:
             # Standard-Templates wenn keine angegeben
             if not template_dirs and not tags:
-                tags = "api,exposure,misconfig,default-logins,mcp,tech"
+                # Keep in sync with PipelineConfig.nuclei_tags
+                tags = "api,exposure,misconfig,default-logins,mcp,cve,tech"
 
             cmd = [
                 self.binary if _avail else "nuclei",
@@ -1037,7 +1038,7 @@ class NucleiAdapter:
 
             if not _avail:
                 if shutil.which("docker"):
-                    return self._run_docker(tenant_id, targets, tags, severity_filter)
+                    return self._run_docker(tenant_id, targets, tags, severity_filter, log_fn)
                 return self._python_http_checks(tenant_id, targets, log_fn)
 
             rc, stdout, stderr = _run(cmd, timeout=900)
@@ -1045,11 +1046,11 @@ class NucleiAdapter:
 
             # Always log stderr — nuclei writes template/target counts there via -stats
             _stderr_full = (stderr or "").strip()
-            _stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
+            _stdout_lines = sum(1 for l in stdout.splitlines() if l.strip())
             if log_fn:
                 if _stderr_full:
-                    # Log stderr in chunks of 400 chars so nothing is cut off
-                    for _i in range(0, min(len(_stderr_full), 1200), 400):
+                    # Log stderr in 400-char chunks; cap at 3200 to capture full -stats output
+                    for _i in range(0, min(len(_stderr_full), 3200), 400):
                         log_fn("nuclei", f"stderr: {_stderr_full[_i:_i+400]}", "info")
                 if rc != 0 and not stdout.strip():
                     log_fn("nuclei", f"rc={rc} FEHLER — kein stdout", "error")
@@ -1147,6 +1148,9 @@ class NucleiAdapter:
 
                 for hdr, sev, title, fix in SECURITY_HEADERS:
                     if hdr.lower() not in headers_lc:
+                        # HSTS only makes sense on HTTPS — skip for plain HTTP
+                        if hdr == "Strict-Transport-Security" and not url.startswith("https://"):
+                            continue
                         local_findings.append(ToolFinding(
                             tenant_id=tenant_id, tool="nuclei",
                             category="vulnerability", severity=sev,
@@ -1165,9 +1169,6 @@ class NucleiAdapter:
                         description=f"Server-Banner auf {url}: {server}",
                         affected_asset=url,
                     ))
-            except _ue.HTTPError as e:
-                if e.code not in (401, 403, 404):
-                    pass
             except Exception:
                 pass
 
@@ -1231,8 +1232,12 @@ class NucleiAdapter:
             ("/mcp", 9000), ("/api/mcp", 8080),
         ]
 
+        # Strip scheme, path, and port — the port comes from mcp_endpoints below.
+        # When targets are full URLs (pipeline path: http://host:3000) the naive
+        # split("/")[0] leaves "host:3000", which then produces "http://host:3000:8080"
+        # → invalid URL.  The extra .split(":")[0] strips the port.
         hosts = list({
-            t.replace("http://", "").replace("https://", "").split("/")[0]
+            t.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
             for t in targets if t
         })
 
@@ -1301,7 +1306,7 @@ class NucleiAdapter:
                     pass
         return findings
 
-    def _run_docker(self, tenant_id, targets, tags, severity) -> list[ToolFinding]:
+    def _run_docker(self, tenant_id, targets, tags, severity, log_fn=None) -> list[ToolFinding]:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
             tf.write("\n".join(targets))
             target_file = tf.name
@@ -1312,10 +1317,16 @@ class NucleiAdapter:
                 "projectdiscovery/nuclei:latest",
                 "-l", "/targets.txt", "-json", "-silent",
                 "-severity", severity,
+                "-duc",  # disable update check inside ephemeral container
             ]
             if tags:
                 cmd += ["-tags", tags]
+            if log_fn:
+                log_fn("nuclei", f"docker fallback | {len(targets)} targets | tags={tags}", "info")
             rc, stdout, stderr = _run(cmd, timeout=900)
+            if log_fn:
+                _lines = sum(1 for l in stdout.splitlines() if l.strip())
+                log_fn("nuclei", f"docker rc={rc} | {_lines} JSON-Zeilen", "info" if rc == 0 else "warn")
             return self._parse(tenant_id, stdout, stderr, rc)
         finally:
             os.unlink(target_file)
@@ -1337,7 +1348,9 @@ class NucleiAdapter:
                 matched_at = entry.get("matched-at", entry.get("host", ""))
                 description = entry.get("info", {}).get("description", "")
                 remediation = entry.get("info", {}).get("remediation", "")
-                cve_list = entry.get("info", {}).get("classification", {}).get("cve-id", [])
+                # nuclei may return cve-id as a string or a list depending on build/version
+                _cve_raw = entry.get("info", {}).get("classification", {}).get("cve-id", [])
+                cve_list = [_cve_raw] if isinstance(_cve_raw, str) and _cve_raw else (_cve_raw or [])
                 cve_id = cve_list[0] if cve_list else ""
                 cvss = entry.get("info", {}).get("classification", {}).get("cvss-score", 0.0)
                 # nuclei v3: info.tags can be a comma-string OR a list depending on build
@@ -1347,7 +1360,7 @@ class NucleiAdapter:
                 else:
                     tags_list = list(_tags_raw) if _tags_raw else []
 
-                is_mcp = any(t in ["mcp", "mcp-server", "model-context-protocol"]
+                is_mcp = any(t in {"mcp", "mcp-server", "model-context-protocol", "mcp-inspector"}
                             for t in tags_list)
                 category = "mcp_exposure" if is_mcp else (
                     "cve" if cve_id else "vulnerability"

@@ -554,7 +554,10 @@ def run_mcp_scan(tenant_id: str, targets: list, use_ramparts: bool = True):
     if use_ramparts:
         mcp_urls = []
         for target in targets:
-            host = target.replace("http://","").replace("https://","").split("/")[0]
+            # Strip scheme, path, and port — same fix as _check_mcp_handshake:
+            # targets may be full URLs (http://host:3000) where split("/")[0]
+            # leaves "host:3000", causing "http://host:3000:8080/mcp" (invalid).
+            host = target.replace("http://","").replace("https://","").split("/")[0].split(":")[0]
             for port in [3000, 8080, 8000, 9000, 6277]:
                 mcp_urls.extend([
                     f"http://{host}:{port}/mcp",
