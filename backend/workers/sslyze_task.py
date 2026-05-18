@@ -305,12 +305,18 @@ def run_sslyze(self, tenant_id: str, targets: list) -> dict:
 
     normalized = []
     for t in targets:
-        if isinstance(t, dict):
-            normalized.append((t["host"], int(t.get("port", 443))))
-        elif isinstance(t, (list, tuple)) and len(t) >= 2:
-            normalized.append((str(t[0]), int(t[1])))
-        else:
-            normalized.append((str(t), 443))
+        try:
+            if isinstance(t, dict):
+                host = t.get("host") or ""
+                port = int(t.get("port") or 443)
+                normalized.append((host, port))
+            elif isinstance(t, (list, tuple)) and len(t) >= 2:
+                normalized.append((str(t[0]), int(t[1])))
+            else:
+                normalized.append((str(t), 443))
+        except (ValueError, TypeError, KeyError) as e:
+            logger.warning(f"SSLyze: invalid target {t!r}: {e}")
+            continue
 
     logger.info(f"[{tenant_id}] SSLyze: scanning {len(normalized)} TLS endpoints")
 

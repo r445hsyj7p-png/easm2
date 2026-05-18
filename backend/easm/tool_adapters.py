@@ -636,7 +636,7 @@ class HTTPXAdapter:
                 "-include-response-header",
             ]
 
-            if take_screenshots and shutil.which("chromium") or shutil.which("google-chrome"):
+            if take_screenshots and (shutil.which("chromium") or shutil.which("google-chrome")):
                 cmd += ["-screenshot", "-screenshot-type", "jpeg",
                         "-screenshot-timeout", "10"]
 
@@ -791,6 +791,9 @@ class NucleiAdapter:
     - misconfigs/   → Fehlkonfigurationen
     """
 
+    def __init__(self):
+        self.binary = "nuclei"
+
     # Template-Kategorien mit Schweregrad-Mapping
     TEMPLATE_SEVERITY = {
         "critical": "CRITICAL",
@@ -862,9 +865,12 @@ class NucleiAdapter:
 
     def run_mcp_scan(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
         """Spezialisierter MCP-Scan mit MCP-spezifischen Templates"""
-        # Erweiterte Ports für MCP-Scanner
         mcp_targets = []
         for t in targets:
+            # Skip if already a full URL (has scheme) — avoid double-wrapping
+            if t.startswith("http://") or t.startswith("https://"):
+                mcp_targets.append(t)
+                continue
             for port in [3000, 6274, 6277, 8000, 8080, 9000]:
                 mcp_targets.append(f"http://{t}:{port}")
                 mcp_targets.append(f"https://{t}:{port}")

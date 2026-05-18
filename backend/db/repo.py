@@ -152,7 +152,8 @@ async def update_finding_status(
         RETURNING id
     """), {"status": status, "ticket": ticket_ref, "fid": finding_id, "tid": tenant_id})
     await db.commit()
-    return r.rowcount > 0
+    row = r.fetchone()
+    return row is not None
 
 
 async def upsert_finding(db: AsyncSession, tenant_id: str, f: dict) -> str:
@@ -340,18 +341,21 @@ async def list_scans(
 ) -> dict:
     r = await db.execute(text("""
         SELECT id,
-               (SELECT domain FROM domains WHERE id = target_domain_id LIMIT 1) AS domain,
+               COALESCE(
+                 (SELECT domain FROM domains WHERE id = target_domain_id LIMIT 1),
+                 (SELECT MIN(domain) FROM domains WHERE tenant_id = scan_jobs.tenant_id AND status = 'active')
+               ) AS domain,
                scan_type, status,
                COALESCE((findings_count->>'CRITICAL')::int, 0) +
                COALESCE((findings_count->>'HIGH')::int, 0) +
                COALESCE((findings_count->>'MEDIUM')::int, 0) +
                COALESCE((findings_count->>'LOW')::int, 0) AS findings_count,
                risk_score_after AS risk_score,
-               created_at AS started_at,
+               COALESCE(started_at, created_at) AS started_at,
                completed_at AS finished_at,
                duration_seconds,
                raw_results->'phases_completed' AS phases_completed,
-               100 AS progress_pct
+               COALESCE((raw_results->>'progress_pct')::int, 0) AS progress_pct
         FROM scan_jobs
         WHERE tenant_id = :tid
         ORDER BY created_at DESC
@@ -376,13 +380,25 @@ async def create_scan_job(
     db: AsyncSession, tenant_id: str, scan_type: str, triggered_by: str = "manual"
 ) -> str:
     r = await db.execute(text("""
-        INSERT INTO scan_jobs (id, tenant_id, scan_type, status, triggered_by, created_at)
-        VALUES (gen_random_uuid()::text, :tid, :type, 'pending', :by, NOW())
+        INSERT INTO scan_jobs (
+            id, tenant_id, target_domain_id, scan_type, status, triggered_by, created_at
+        )
+        VALUES (
+            gen_random_uuid()::text,
+            :tid,
+            (SELECT id FROM domains WHERE tenant_id = :tid AND status = 'active' ORDER BY created_at LIMIT 1),
+            :type,
+            'pending',
+            :by,
+            NOW()
+        )
         RETURNING id
     """), {"tid": tenant_id, "type": scan_type, "by": triggered_by})
-    scan_id = r.scalar()  # fetch before commit — cursor closed after commit
+    row = r.fetchone()  # fetch before commit — cursor closed after commit
     await db.commit()
-    return scan_id
+    if not row:
+        raise RuntimeError(f"Scan-Job konnte nicht erstellt werden für Mandant {tenant_id}")
+    return str(row[0])
 
 
 # ─── Users ───────────────────────────────────────────────────────────────────
@@ -512,7 +528,8 @@ async def update_domain(
         params,
     )
     await db.commit()
-    return r.rowcount > 0
+    row = r.fetchone()
+    return row is not None
 
 
 async def delete_domain(db: AsyncSession, tenant_id: str, domain_id: str) -> bool:
@@ -521,7 +538,8 @@ async def delete_domain(db: AsyncSession, tenant_id: str, domain_id: str) -> boo
         {"did": domain_id, "tid": tenant_id},
     )
     await db.commit()
-    return r.rowcount > 0
+    row = r.fetchone()
+    return row is not None
 
 
 # ─── Tenant Settings (schedule + notifications) ───────────────────────────────

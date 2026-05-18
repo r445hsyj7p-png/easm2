@@ -39,7 +39,7 @@ function LoadingScreen() {
           <path d="M12 2L3 7v5c0 5.5 3.8 10.7 9 12 5.2-1.3 9-6.5 9-12V7L12 2z"/>
         </svg>
       </div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#273548",
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#94a3b8",
         letterSpacing: "0.1em" }}>LADEN...</div>
     </div>
   );
@@ -141,8 +141,9 @@ export default function AppShell() {
               Nächster: <span style={{ color: T.accent }}>{nextScanStr}</span>
             </div>
             <Btn onClick={() => {
-              triggerScan("full");
-              toast.success("Scan gestartet", { description: "Full-Pipeline läuft im Hintergrund." });
+              triggerScan("full")
+                .then(() => toast.success("Scan gestartet", { description: "Full-Pipeline läuft im Hintergrund." }))
+                .catch(e => toast.error("Scan fehlgeschlagen", { description: e.message }));
             }} variant="primary" size="sm">
               <RefreshCw size={10} />SCAN NOW
             </Btn>

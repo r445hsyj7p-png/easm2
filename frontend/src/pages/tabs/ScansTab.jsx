@@ -7,7 +7,7 @@ import { useApp } from "../../context/AppContext";
 const ScanTimeline = ({ scans }) => (
   <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
     {scans.map((s,i) => (
-      <div key={i} style={{ display:"flex", gap:10, position:"relative" }}>
+      <div key={s.id || i} style={{ display:"flex", gap:10, position:"relative" }}>
         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:16 }}>
           {s.status==="completed" ? <CheckCircle size={12} color={T.accent} style={{ flexShrink:0, marginTop:2 }} /> :
            s.status==="running"   ? <Loader2    size={12} color={T.accent} style={{ flexShrink:0, marginTop:2, animation:"spin 1s linear infinite" }} /> :
@@ -82,7 +82,8 @@ const DEFAULT_SELECTED = { discovery:true, portscan:true, tls:true, http:true, v
 
 const ScansTab = () => {
   const { tenant, triggerScan, scans } = useApp();
-  const mappedScans = (scans || []).slice(0, 10).map(s => ({
+  const mappedScans = (Array.isArray(scans) ? scans : []).slice(0, 10).map(s => ({
+    id: s.id,
     label: `${s.started_at ? s.started_at.slice(0, 16).replace("T", " ") : "—"} — ${(s.scan_type || "full").replace(/_/g, " ")} Scan`,
     status: s.status || "pending",
     time: s.duration_seconds ? `${s.duration_seconds}s` : "—",
@@ -112,40 +113,43 @@ const ScansTab = () => {
     });
   };
 
-  const startScan = async () => {
-    if (activePhases.length === 0) return;
-    setRunning(true); setProgress(0); setPhase(0); setLogs([]);
+  const startScan = () => {
+    if (activePhases.length === 0 || running) return;
 
     const scanType = activePhases.length === ALL_PHASES.length
       ? "full"
       : activePhases.map(p => p.key).join(",");
 
-    try {
-      await triggerScan(scanType);
-    } catch (e) {
-      toast.error("Scan konnte nicht gestartet werden", { description: e.message });
-      setRunning(false);
-      return;
-    }
+    // Fire-and-forget: dispatch API call in background, never block animation
+    triggerScan(scanType)
+      .then(() => toast.info("Scan dispatched", { description: "Pipeline läuft im Hintergrund." }))
+      .catch(e => toast.error("Scan-Dispatch fehlgeschlagen", { description: e.message }));
 
-    toast.info("Scan gestartet", { description: "Pipeline läuft — Ergebnisse erscheinen live." });
+    setRunning(true); setProgress(0); setPhase(0); setLogs([]);
 
+    // Capture locals for the interval closure
+    const snapLogs  = SCAN_LOG.filter(l => selected[l.phase]);
+    const n         = activePhases.length;
     let p = 0, logI = 0;
-    const n = activePhases.length;
+
+    if (intervalRef.current) clearInterval(intervalRef.current);
     intervalRef.current = setInterval(() => {
-      p = Math.min(p + (0.9 * 6 / Math.max(n, 1)), 100);
+      p = Math.min(p + (5.4 / Math.max(n, 1)), 100);
       setPhase(Math.min(Math.floor(p * n / 100), n - 1));
-      const threshold = (logI / activeLogs.length) * 100;
-      if (p >= threshold && logI < activeLogs.length) {
-        setLogs(l => [...l, activeLogs[logI]]);
-        logI++;
+      if (snapLogs.length > 0) {
+        const threshold = (logI / snapLogs.length) * 100;
+        if (p >= threshold && logI < snapLogs.length) {
+          setLogs(l => [...l, snapLogs[logI]]);
+          logI++;
+        }
       }
       setProgress(p);
       if (p >= 100) {
         clearInterval(intervalRef.current);
+        intervalRef.current = null;
         setRunning(false);
         setPhase(-1);
-        toast.success("Scan gestartet", { description: "Scan läuft im Hintergrund — Ergebnisse erscheinen nach Abschluss." });
+        toast.success("Animation abgeschlossen", { description: "Scan läuft im Hintergrund — Ergebnisse erscheinen nach Abschluss." });
       }
     }, 90);
   };
@@ -192,7 +196,7 @@ const ScansTab = () => {
             <div>
               <div style={{ fontFamily:"'IBM Plex Sans',sans-serif", fontSize:14, fontWeight:600, color:T.text0 }}>Scan Pipeline</div>
               <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:9, color:T.text3, marginTop:3 }}>
-                {tenant?.slug || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
+                {tenant?.domain || tenant?.name || "—"} · {activePhases.map(p => p.label).join(" · ")}
               </div>
             </div>
             <button onClick={startScan} disabled={running || activePhases.length === 0} style={{
