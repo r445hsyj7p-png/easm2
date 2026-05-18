@@ -276,12 +276,12 @@ const IntelTab = () => {
                 <Sev s={f.sev} small/>
                 <div style={{flex:1}}>
                   <div style={{fontFamily:T.font,fontSize:10,color:T.critical,marginBottom:2}}>{f.cve}</div>
-                  <div style={{fontFamily:T.fontSans,fontSize:11,color:T.text1}}>{f.title.split("—")[1]?.trim()||f.title}</div>
+                  <div style={{fontFamily:T.fontSans,fontSize:11,color:T.text1}}>{(f.title||"").split("—")[1]?.trim()||(f.title||"")}</div>
                 </div>
                 <div style={{textAlign:"right",flexShrink:0}}>
-                  <div style={{fontFamily:T.font,fontSize:11,fontWeight:700,color:f.cvss>=9?T.red:T.high}}>{f.cvss.toFixed(1)}</div>
+                  <div style={{fontFamily:T.font,fontSize:11,fontWeight:700,color:(f.cvss||0)>=9?T.red:T.high}}>{(f.cvss||0).toFixed(1)}</div>
                   {f.kev&&<Tag label="KEV" color={T.red} bg={`${T.critical}12`} border={`${T.critical}40`}/>}
-                  {f.epss!=="—"&&<div style={{fontFamily:T.font,fontSize:9,color:T.text2,marginTop:3}}>EPSS {f.epss}</div>}
+                  {f.epss&&f.epss!=="—"&&<div style={{fontFamily:T.font,fontSize:9,color:T.text2,marginTop:3}}>EPSS {f.epss}</div>}
                 </div>
               </div>
             ))}

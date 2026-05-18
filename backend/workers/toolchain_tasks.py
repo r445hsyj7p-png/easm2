@@ -296,17 +296,17 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
             pipeline._phase_http(report, http_targets)
 
             _progress(70, "vuln")
-            pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), mcp_hosts)
+            pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), list(mcp_hosts))
 
             _progress(88, "mcp")
             # Always check domain's common MCP ports even without port scan hits
-            if domain and not mcp_hosts:
+            mcp_phase_targets = list(mcp_hosts)
+            if domain and not mcp_phase_targets:
                 for _port in (3000, 8080, 8000, 6274, 6277):
-                    mcp_hosts.append(f"http://{domain}:{_port}")
-                    mcp_hosts.append(f"https://{domain}:{_port}")
-                mcp_hosts = list(set(mcp_hosts))
+                    mcp_phase_targets.append(f"http://{domain}:{_port}")
+                    mcp_phase_targets.append(f"https://{domain}:{_port}")
             if config.run_ramparts:
-                pipeline._phase_mcp(report, mcp_hosts)
+                pipeline._phase_mcp(report, list(set(mcp_phase_targets)))
 
             _progress(95, "aggregating")
             pipeline._aggregate(report)
@@ -933,11 +933,13 @@ def _resolve_assets(fqdns: list, hosts: list) -> tuple:
     all_targets = list(set(fqdns + hosts))
 
     def _resolve(target):
+        if not target or not isinstance(target, str):
+            return target, None
         # Already an IP?
         try:
             _sock.inet_aton(target)
             return target, target
-        except OSError:
+        except (OSError, TypeError):
             pass
         try:
             return target, _sock.gethostbyname(target)
@@ -1077,7 +1079,7 @@ def _save_report(tenant_id: str, job_id: str, report):
                          '{}', 'LOW', ARRAY['subfinder'], FALSE, '[]',
                          NOW(), NOW())
                     ON CONFLICT DO NOTHING
-                """, (tenant_id, fqdn, _ip, _org or None, _asn or None))
+                """, (tenant_id, fqdn, _ip, _org or None, _asn if _asn else None))
                 saved_assets += 1
 
             for host, ports in report.open_ports.items():

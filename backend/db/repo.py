@@ -329,7 +329,7 @@ async def get_intel(db: AsyncSession, tenant_id: str) -> dict:
         LIMIT 1
     """), {"tid": tenant_id})
     row = r.first()
-    return dict(row[0]) if row else {}
+    return dict(row[0]) if row and row[0] else {}
 
 
 async def upsert_intel(db: AsyncSession, tenant_id: str, data: dict):
