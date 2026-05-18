@@ -436,7 +436,7 @@ def run_discovery(tenant_id: str, domain: str, api_keys: dict = None):
     emails = []
     for f in findings_th:
         if f.category == "email":
-            emails = f.raw_data.get("emails", [])
+            emails.extend(f.raw_data.get("emails", []))
 
     logger.info(f"[{tenant_id}] Discovery: {len(subdomains)} subdomains, "
                f"{len(emails)} emails")
@@ -905,6 +905,9 @@ def _update_scan_status(job_id: str, status: str,
                 )
             elif status == "completed":
                 by_sev = data.get("by_severity", {}) if data else {}
+                # Merge into raw_results using || so scan_log entries are preserved.
+                # The right-hand side wins for duplicate keys, scan_log only exists
+                # in the accumulated left side so it survives the merge.
                 cur.execute("""
                     UPDATE scan_jobs SET
                         status            = 'completed',
@@ -912,7 +915,8 @@ def _update_scan_status(job_id: str, status: str,
                         duration_seconds  = %s,
                         risk_score_after  = %s,
                         findings_count    = %s,
-                        raw_results       = %s
+                        raw_results       = COALESCE(raw_results, '{}'::jsonb)
+                                           || %s::jsonb
                     WHERE id = %s
                 """, (
                     data.get("duration_seconds") if data else None,
