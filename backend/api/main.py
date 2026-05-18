@@ -539,9 +539,28 @@ async def trigger_scan(
     scan_id = await repo.create_scan_job(db, tenant_id, req.scan_type, "manual")
     # Dispatch to Celery
     try:
+        from sqlalchemy import text
         from workers.toolchain_tasks import run_full_pipeline
+        # Load tenant domain for scan targeting
+        domain_row = await db.execute(text("""
+            SELECT COALESCE(MIN(d.domain), t.slug, '') AS domain,
+                   COALESCE(array_agg(DISTINCT r) FILTER (WHERE r IS NOT NULL), '{}') AS ip_ranges,
+                   COALESCE(MAX(d.panos_version), '') AS panos_version
+            FROM tenants t
+            LEFT JOIN domains d ON d.tenant_id = t.id AND d.status = 'active'
+            LEFT JOIN LATERAL unnest(d.ip_ranges) AS r ON TRUE
+            WHERE t.id = :tid
+            GROUP BY t.id, t.slug
+        """), {"tid": tenant_id})
+        domain_info = domain_row.mappings().first() or {}
         run_full_pipeline.apply_async(
-            args=[tenant_id, {"scan_id": scan_id, "scan_type": req.scan_type}],
+            args=[tenant_id, {
+                "scan_id":       scan_id,
+                "scan_type":     req.scan_type,
+                "domain":        domain_info.get("domain", ""),
+                "ip_ranges":     list(domain_info.get("ip_ranges") or []),
+                "panos_version": domain_info.get("panos_version", ""),
+            }],
             kwargs={"request_id": request_id_var.get()},
             queue="scans",
         )

@@ -221,19 +221,12 @@ async def upsert_asset(db: AsyncSession, tenant_id: str, a: dict):
     import json as _json
     await db.execute(text("""
         INSERT INTO assets
-            (id, tenant_id, fqdn, ip, org, asn, ports, risk, sources, takeover, technologies)
+            (id, tenant_id, fqdn, ip, org, asn, ports, risk, sources, takeover,
+             technologies, first_seen, last_seen)
         VALUES
             (gen_random_uuid()::text, :tid, :fqdn, :ip::inet, :org, :asn,
-             :ports, :risk, :sources, :takeover, :technologies)
-        ON CONFLICT (tenant_id, fqdn, ip) DO UPDATE SET
-            org          = EXCLUDED.org,
-            asn          = EXCLUDED.asn,
-            ports        = EXCLUDED.ports,
-            risk         = EXCLUDED.risk,
-            sources      = EXCLUDED.sources,
-            takeover     = EXCLUDED.takeover,
-            technologies = EXCLUDED.technologies,
-            last_seen    = NOW()
+             :ports, :risk, :sources, :takeover, :technologies, NOW(), NOW())
+        ON CONFLICT DO NOTHING
     """), {
         "tid": tenant_id, "fqdn": a.get("fqdn"),
         "ip": a.get("ip"), "org": a.get("org"), "asn": a.get("asn"),
