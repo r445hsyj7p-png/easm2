@@ -66,7 +66,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ramparts is worker-only and may not be on PyPI — install best-effort
 RUN pip install --no-cache-dir ramparts || echo "ramparts not available on PyPI, skipping"
 
-# App code
+# App code — CACHEBUST=20260518-3
 COPY . .
 
 # Entrypoint

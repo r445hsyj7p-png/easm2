@@ -879,7 +879,7 @@ def _build_config(config_dict: dict):
         naabu_ports="top-1000", naabu_rate=2000, naabu_nmap=True,
         theharvester_full_sources=True, theharvester_limit=1000,
         httpx_screenshots=True, httpx_threads=100,
-        nuclei_tags="api,exposure,misconfig,default-login,mcp,cve",
+        nuclei_tags="api,exposure,misconfig,default-logins,mcp,tech,cve",
         nuclei_severity="info,low,medium,high,critical",
         nuclei_rate=150,
         ramparts_llm=False,
