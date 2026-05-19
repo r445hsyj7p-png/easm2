@@ -13,6 +13,7 @@ Tools: Subfinder · Naabu · theHarvester · HTTPX · Nuclei · Ramparts
 
 import subprocess
 import json
+import logging
 import os
 import re
 import shutil
@@ -428,28 +429,29 @@ class NaabuAdapter:
             except Exception:
                 return False
 
-        for host in hosts:
-            with _TPE(max_workers=30) as ex:
-                futs = {ex.submit(_check, host, p): p for p in COMMON_PORTS}
-                for fut, port in futs.items():
-                    try:
-                        if fut.result(timeout=3):
-                            service = self.SERVICE_MAP.get(port, f"Port {port}")
-                            is_mcp = port in self.MCP_PORTS
-                            sev = ("CRITICAL" if port in self.CRITICAL_PORTS
-                                   else "HIGH" if port in self.HIGH_PORTS or is_mcp
-                                   else "MEDIUM")
-                            findings.append(ToolFinding(
-                                tenant_id=tenant_id, tool="naabu",
-                                category="mcp_exposure" if is_mcp else "port",
-                                severity=sev,
-                                title=f"{service} exponiert: {host}:{port}",
-                                description=f"Port {port} ({service}) auf {host} ist offen.",
-                                affected_asset=f"{host}:{port}",
-                                raw_data={"ip": host, "port": port},
-                            ))
-                    except Exception:
-                        pass
+        pairs = [(h, p) for h in hosts for p in COMMON_PORTS]
+        n_workers = max(1, min(50, len(pairs)))
+        with _TPE(max_workers=n_workers) as ex:
+            futs = {ex.submit(_check, h, p): (h, p) for h, p in pairs}
+            for fut, (host, port) in futs.items():
+                try:
+                    if fut.result(timeout=3):
+                        service = self.SERVICE_MAP.get(port, f"Port {port}")
+                        is_mcp = port in self.MCP_PORTS
+                        sev = ("CRITICAL" if port in self.CRITICAL_PORTS
+                               else "HIGH" if port in self.HIGH_PORTS or is_mcp
+                               else "MEDIUM")
+                        findings.append(ToolFinding(
+                            tenant_id=tenant_id, tool="naabu",
+                            category="mcp_exposure" if is_mcp else "port",
+                            severity=sev,
+                            title=f"{service} exponiert: {host}:{port}",
+                            description=f"Port {port} ({service}) auf {host} ist offen.",
+                            affected_asset=f"{host}:{port}",
+                            raw_data={"ip": host, "port": port},
+                        ))
+                except Exception:
+                    pass
         if log_fn:
             log_fn("naabu", f"Python TCP-Fallback: {len(findings)} offene Ports auf {len(hosts)} Hosts", "info")
         return findings
@@ -562,11 +564,13 @@ class TheHarvesterAdapter:
 
         if log_fn:
             if _binary_avail:
-                log_fn("theharvester", "binary verfügbar", "info")
+                log_fn("theharvester", "binary verfügbar (/usr/local/bin/theHarvester)", "info")
             elif _module_avail:
                 log_fn("theharvester", "binary nicht gefunden, nutze python -m theHarvester", "warn")
             else:
-                log_fn("theharvester", "binary NICHT gefunden und python-Modul nicht verfügbar — übersprungen", "warn")
+                log_fn("theharvester",
+                       "binary NICHT gefunden — Worker-Image neu bauen (git fehlte beim letzten Build)",
+                       "warn")
 
         if not _avail:
             try:
@@ -581,6 +585,8 @@ class TheHarvesterAdapter:
                 "-b", sources,
                 "-l", str(limit),
                 "-f", output_file.replace(".json", ""),
+                # --dns-lookup omitted: removed in theHarvester 4.6+ (DNS resolution
+                # now happens automatically per-source, flag no longer accepted)
             ]
 
             rc, stdout, stderr = _run(cmd, timeout=300)
@@ -942,6 +948,8 @@ class NucleiAdapter:
     - misconfigs/   → Fehlkonfigurationen
     """
 
+    _logger = logging.getLogger("easm.nuclei")
+
     def __init__(self):
         self.binary = "nuclei"
 
@@ -979,14 +987,15 @@ class NucleiAdapter:
         _home = os.path.expanduser("~")
         _tmpl_dir = os.path.join(_home, "nuclei-templates")
         _tmpl_exists = os.path.isdir(_tmpl_dir)
+        # Avoid rglob("*.yaml") over 9000+ templates — use a cheap non-recursive check
         try:
-            _tmpl_count = sum(1 for _ in Path(_tmpl_dir).rglob("*.yaml")) if _tmpl_exists else 0
+            _tmpl_has_files = _tmpl_exists and any(Path(_tmpl_dir).iterdir())
         except Exception:
-            _tmpl_count = 0
+            _tmpl_has_files = False
         if log_fn:
             log_fn("nuclei",
                    f"binary {'verfügbar' if _avail else 'NICHT gefunden'} | "
-                   f"templates: {_tmpl_count} .yaml in {_tmpl_dir}",
+                   f"templates: {'vorhanden' if _tmpl_has_files else 'FEHLEN'} in {_tmpl_dir}",
                    "info" if _avail else "error")
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
@@ -999,7 +1008,8 @@ class NucleiAdapter:
         try:
             # Standard-Templates wenn keine angegeben
             if not template_dirs and not tags:
-                tags = "api,exposure,misconfig,default-logins,mcp,tech"
+                # Keep in sync with PipelineConfig.nuclei_tags
+                tags = "api,exposure,misconfig,default-logins,mcp,cve,tech"
 
             cmd = [
                 self.binary if _avail else "nuclei",
@@ -1020,13 +1030,7 @@ class NucleiAdapter:
             if tags:
                 cmd += ["-tags", tags]
 
-            # Only disable update check if templates already exist locally
-            if _tmpl_exists:
-                with os.scandir(_tmpl_dir) as _sd:
-                    _tmpl_has_content = any(_sd)
-            else:
-                _tmpl_has_content = False
-            if _tmpl_has_content:
+            if _tmpl_has_files:
                 cmd += ["-duc"]
 
             if log_fn:
@@ -1034,7 +1038,7 @@ class NucleiAdapter:
 
             if not _avail:
                 if shutil.which("docker"):
-                    return self._run_docker(tenant_id, targets, tags, severity_filter)
+                    return self._run_docker(tenant_id, targets, tags, severity_filter, log_fn)
                 return self._python_http_checks(tenant_id, targets, log_fn)
 
             rc, stdout, stderr = _run(cmd, timeout=900)
@@ -1042,11 +1046,11 @@ class NucleiAdapter:
 
             # Always log stderr — nuclei writes template/target counts there via -stats
             _stderr_full = (stderr or "").strip()
-            _stdout_lines = len([l for l in stdout.splitlines() if l.strip()])
+            _stdout_lines = sum(1 for l in stdout.splitlines() if l.strip())
             if log_fn:
                 if _stderr_full:
-                    # Log stderr in chunks of 400 chars so nothing is cut off
-                    for _i in range(0, min(len(_stderr_full), 1200), 400):
+                    # Log stderr in 400-char chunks; cap at 3200 to capture full -stats output
+                    for _i in range(0, min(len(_stderr_full), 3200), 400):
                         log_fn("nuclei", f"stderr: {_stderr_full[_i:_i+400]}", "info")
                 if rc != 0 and not stdout.strip():
                     log_fn("nuclei", f"rc={rc} FEHLER — kein stdout", "error")
@@ -1074,9 +1078,11 @@ class NucleiAdapter:
                 mcp_targets.append(f"http://{t}:{port}")
                 mcp_targets.append(f"https://{t}:{port}")
 
+        # mcp_targets already contains all derived URLs — do not append raw
+        # host strings again, that would scan each hostname a second time
         findings = self.run(
             tenant_id=tenant_id,
-            targets=mcp_targets + targets,
+            targets=mcp_targets,
             tags=self.MCP_TAGS + ",api,exposure",
             severity_filter="low,medium,high,critical",
             log_fn=log_fn,
@@ -1104,17 +1110,30 @@ class NucleiAdapter:
             ("Referrer-Policy", "LOW", "Referrer-Policy fehlt",
              "Referrer-Policy: strict-origin-when-cross-origin setzen"),
         ]
+        # Each entry: (path, severity, title, description, content_marker)
+        # content_marker: substring that must appear in the response body to
+        # avoid false positives from redirected 200 login pages.
         EXPOSED_PATHS = [
-            ("/.env", "CRITICAL", "Exposed .env Datei", "Umgebungsvariablen und Credentials öffentlich zugänglich"),
-            ("/.git/config", "HIGH", "Exposed .git/config", "Git-Repository-Konfiguration öffentlich zugänglich"),
-            ("/phpinfo.php", "MEDIUM", "phpinfo() exponiert", "PHP-Konfigurationsdetails öffentlich zugänglich"),
-            ("/.htaccess", "MEDIUM", "Exposed .htaccess", "Apache-Konfigurationsdatei öffentlich zugänglich"),
-            ("/wp-config.php.bak", "CRITICAL", "WordPress Config Backup exponiert", "WordPress-Datenbank-Credentials potenziell zugänglich"),
-            ("/config.php", "HIGH", "Exposed config.php", "Konfigurationsdatei öffentlich zugänglich"),
-            ("/backup.sql", "CRITICAL", "SQL-Backup exponiert", "Datenbank-Backup öffentlich zugänglich"),
-            ("/server-status", "MEDIUM", "Apache server-status exponiert", "Server-Metriken und Anfrageliste öffentlich zugänglich"),
-            ("/actuator/env", "CRITICAL", "Spring Boot Actuator /env exponiert", "Umgebungsvariablen und Secrets öffentlich zugänglich"),
-            ("/actuator/health", "LOW", "Spring Boot Actuator /health exponiert", "Anwendungs-Health-Informationen öffentlich zugänglich"),
+            ("/.env",            "CRITICAL", "Exposed .env Datei",
+             "Umgebungsvariablen und Credentials öffentlich zugänglich", "DB_"),
+            ("/.git/config",     "HIGH",     "Exposed .git/config",
+             "Git-Repository-Konfiguration öffentlich zugänglich", "[core]"),
+            ("/phpinfo.php",     "MEDIUM",   "phpinfo() exponiert",
+             "PHP-Konfigurationsdetails öffentlich zugänglich", "PHP Version"),
+            ("/.htaccess",       "MEDIUM",   "Exposed .htaccess",
+             "Apache-Konfigurationsdatei öffentlich zugänglich", "Rewrite"),
+            ("/wp-config.php.bak","CRITICAL","WordPress Config Backup exponiert",
+             "WordPress-Datenbank-Credentials potenziell zugänglich", "DB_NAME"),
+            ("/config.php",      "HIGH",     "Exposed config.php",
+             "Konfigurationsdatei öffentlich zugänglich", "<?php"),
+            ("/backup.sql",      "CRITICAL", "SQL-Backup exponiert",
+             "Datenbank-Backup öffentlich zugänglich", "INSERT INTO"),
+            ("/server-status",   "MEDIUM",   "Apache server-status exponiert",
+             "Server-Metriken und Anfrageliste öffentlich zugänglich", "Server Version"),
+            ("/actuator/env",    "CRITICAL", "Spring Boot Actuator /env exponiert",
+             "Umgebungsvariablen und Secrets öffentlich zugänglich", "activeProfiles"),
+            ("/actuator/health", "LOW",      "Spring Boot Actuator /health exponiert",
+             "Anwendungs-Health-Informationen öffentlich zugänglich", '"status"'),
         ]
 
         findings = []
@@ -1129,6 +1148,9 @@ class NucleiAdapter:
 
                 for hdr, sev, title, fix in SECURITY_HEADERS:
                     if hdr.lower() not in headers_lc:
+                        # HSTS only makes sense on HTTPS — skip for plain HTTP
+                        if hdr == "Strict-Transport-Security" and not url.startswith("https://"):
+                            continue
                         local_findings.append(ToolFinding(
                             tenant_id=tenant_id, tool="nuclei",
                             category="vulnerability", severity=sev,
@@ -1141,26 +1163,24 @@ class NucleiAdapter:
                 server = headers_lc.get("server", "")
                 if server:
                     local_findings.append(ToolFinding(
-                        tenant_id=tenant_id, tool="httpx",
+                        tenant_id=tenant_id, tool="nuclei",
                         category="http", severity="INFO",
                         title=f"Server-Header: {server}",
                         description=f"Server-Banner auf {url}: {server}",
                         affected_asset=url,
                     ))
-            except _ue.HTTPError as e:
-                if e.code not in (401, 403, 404):
-                    pass
             except Exception:
                 pass
 
-            for path, sev, title, desc in EXPOSED_PATHS:
+            for path, sev, title, desc, marker in EXPOSED_PATHS:
                 try:
                     check_url = url.rstrip("/") + path
                     req = _ur.Request(check_url, headers={"User-Agent": "Mozilla/5.0 EASM-Scanner/1.0"})
                     resp = _ur.urlopen(req, timeout=5)
                     if resp.status == 200:
-                        content = resp.read(512).decode("utf-8", errors="ignore")
-                        if len(content) > 10:
+                        content = resp.read(1024).decode("utf-8", errors="ignore")
+                        # Require content_marker to avoid login-page redirect false positives
+                        if marker in content:
                             local_findings.append(ToolFinding(
                                 tenant_id=tenant_id, tool="nuclei",
                                 category="vulnerability", severity=sev,
@@ -1184,12 +1204,12 @@ class NucleiAdapter:
     def _check_mcp_handshake(self, tenant_id: str, targets: list[str]) -> list[ToolFinding]:
         """
         Prüft ob MCP-Server ohne Authentifizierung erreichbar sind.
-        Sendet einen MCP JSON-RPC initialize-Request.
+        Sendet einen MCP JSON-RPC initialize-Request — parallel über alle Hosts/Ports.
         """
         import urllib.request
-        import urllib.error
+        import ssl
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 
-        findings = []
         mcp_initialize = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1201,71 +1221,92 @@ class NucleiAdapter:
             }
         }).encode()
 
-        # Typische MCP-Ports und Endpunkte
+        # Build SSL context once — reused across all workers
+        _ssl_ctx = ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = ssl.CERT_NONE
+
         mcp_endpoints = [
             ("/mcp", 8080), ("/mcp", 3000), ("/mcp", 8000),
             ("/sse", 6277), ("/", 6274),   # MCP Inspector
             ("/mcp", 9000), ("/api/mcp", 8080),
         ]
 
-        for target in targets:
-            host = target.replace("http://", "").replace("https://", "").split("/")[0]
-            for path, port in mcp_endpoints:
-                for scheme in ["http", "https"]:
-                    url = f"{scheme}://{host}:{port}{path}"
-                    try:
-                        req = urllib.request.Request(
-                            url,
-                            data=mcp_initialize,
-                            headers={
-                                "Content-Type": "application/json",
-                                "User-Agent": "EASM-Scanner/1.0"
-                            },
-                            method="POST"
-                        )
-                        # Selbstsignierte Zertifikate akzeptieren
-                        import ssl
-                        ctx = ssl.create_default_context()
-                        ctx.check_hostname = False
-                        ctx.verify_mode = ssl.CERT_NONE
+        # Strip scheme, path, and port — the port comes from mcp_endpoints below.
+        # When targets are full URLs (pipeline path: http://host:3000) the naive
+        # split("/")[0] leaves "host:3000", which then produces "http://host:3000:8080"
+        # → invalid URL.  The extra .split(":")[0] strips the port.
+        hosts = list({
+            t.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
+            for t in targets if t
+        })
 
-                        with urllib.request.urlopen(req, timeout=3, context=ctx) as resp:
-                            body = resp.read().decode(errors="ignore")
-                            if '"jsonrpc"' in body and '"result"' in body:
-                                # MCP-Server antwortet ohne Auth!
-                                resp_data = json.loads(body)
-                                server_info = resp_data.get("result", {}).get("serverInfo", {})
-                                capabilities = resp_data.get("result", {}).get("capabilities", {})
+        def _probe(host: str, path: str, port: int, scheme: str):
+            url = f"{scheme}://{host}:{port}{path}"
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=mcp_initialize,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "EASM-Scanner/1.0",
+                    },
+                    method="POST",
+                )
+                ctx = _ssl_ctx if scheme == "https" else None
+                with urllib.request.urlopen(req, timeout=2, context=ctx) as resp:
+                    body = resp.read().decode(errors="ignore")
+                if '"jsonrpc"' in body and '"result"' in body:
+                    resp_data = json.loads(body)
+                    server_info = resp_data.get("result", {}).get("serverInfo", {})
+                    capabilities = resp_data.get("result", {}).get("capabilities", {})
+                    return ToolFinding(
+                        tenant_id=tenant_id,
+                        tool="nuclei",
+                        category="mcp_exposure",
+                        severity="CRITICAL",
+                        title=f"MCP-Server ohne Authentifizierung: {url}",
+                        description=(
+                            f"MCP-Server auf {url} antwortet auf initialize-Requests "
+                            f"OHNE Authentifizierung. "
+                            f"Server: {server_info.get('name', 'unbekannt')} "
+                            f"v{server_info.get('version', '?')}. "
+                            f"Capabilities: {list(capabilities.keys())}. "
+                            f"Ein Angreifer kann alle verfügbaren Tools (tools/list) "
+                            f"auflisten und aufrufen — inkl. Filesystem, Shell, DB-Zugriff."
+                        ),
+                        affected_asset=url,
+                        remediation=(
+                            "Bearer-Token-Authentifizierung aktivieren. "
+                            "Produktions-MCP-Server nie auf 0.0.0.0 binden. "
+                            "MCP Inspector nie in Produktion betreiben."
+                        ),
+                        raw_data={"response": resp_data, "url": url},
+                    )
+            except Exception:
+                pass  # Port nicht offen oder Auth vorhanden
+            return None
 
-                                findings.append(ToolFinding(
-                                    tenant_id=tenant_id,
-                                    tool="nuclei",
-                                    category="mcp_exposure",
-                                    severity="CRITICAL",
-                                    title=f"MCP-Server ohne Authentifizierung: {url}",
-                                    description=(
-                                        f"MCP-Server auf {url} antwortet auf initialize-Requests "
-                                        f"OHNE Authentifizierung. "
-                                        f"Server: {server_info.get('name', 'unbekannt')} "
-                                        f"v{server_info.get('version', '?')}. "
-                                        f"Capabilities: {list(capabilities.keys())}. "
-                                        f"Ein Angreifer kann alle verfügbaren Tools (tools/list) "
-                                        f"auflisten und aufrufen — inkl. Filesystem, Shell, DB-Zugriff."
-                                    ),
-                                    affected_asset=url,
-                                    remediation=(
-                                        "Bearer-Token-Authentifizierung aktivieren. "
-                                        "Produktions-MCP-Server nie auf 0.0.0.0 binden. "
-                                        "MCP Inspector nie in Produktion betreiben."
-                                    ),
-                                    raw_data={"response": resp_data, "url": url},
-                                ))
-                    except Exception:
-                        pass  # Port nicht offen oder Auth vorhanden
-
+        findings = []
+        probes = [
+            (host, path, port, scheme)
+            for host in hosts
+            for path, port in mcp_endpoints
+            for scheme in ("http", "https")
+        ]
+        n_workers = min(30, len(probes)) if probes else 1
+        with _TPE(max_workers=n_workers) as ex:
+            futs = {ex.submit(_probe, *p): p for p in probes}
+            for fut in _ac(futs, timeout=30):
+                try:
+                    result = fut.result()
+                    if result:
+                        findings.append(result)
+                except Exception:
+                    pass
         return findings
 
-    def _run_docker(self, tenant_id, targets, tags, severity) -> list[ToolFinding]:
+    def _run_docker(self, tenant_id, targets, tags, severity, log_fn=None) -> list[ToolFinding]:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tf:
             tf.write("\n".join(targets))
             target_file = tf.name
@@ -1276,20 +1317,24 @@ class NucleiAdapter:
                 "projectdiscovery/nuclei:latest",
                 "-l", "/targets.txt", "-json", "-silent",
                 "-severity", severity,
+                "-duc",  # disable update check inside ephemeral container
             ]
             if tags:
                 cmd += ["-tags", tags]
+            if log_fn:
+                log_fn("nuclei", f"docker fallback | {len(targets)} targets | tags={tags}", "info")
             rc, stdout, stderr = _run(cmd, timeout=900)
+            if log_fn:
+                _lines = sum(1 for l in stdout.splitlines() if l.strip())
+                log_fn("nuclei", f"docker rc={rc} | {_lines} JSON-Zeilen", "info" if rc == 0 else "warn")
             return self._parse(tenant_id, stdout, stderr, rc)
         finally:
             os.unlink(target_file)
 
     def _parse(self, tenant_id: str, stdout: str,  # NucleiAdapter
                stderr: str, rc: int) -> list[ToolFinding]:
-        import logging as _log
-        _nlog = _log.getLogger("easm.nuclei")
         if rc < 0 or (rc != 0 and not stdout.strip()):
-            _nlog.warning("nuclei rc=%d no-stdout stderr=%s", rc, stderr[:300])
+            self._logger.warning("nuclei rc=%d no-stdout stderr=%s", rc, stderr[:300])
         findings = []
         for line in stdout.strip().splitlines():
             if not line.strip():
@@ -1303,7 +1348,9 @@ class NucleiAdapter:
                 matched_at = entry.get("matched-at", entry.get("host", ""))
                 description = entry.get("info", {}).get("description", "")
                 remediation = entry.get("info", {}).get("remediation", "")
-                cve_list = entry.get("info", {}).get("classification", {}).get("cve-id", [])
+                # nuclei may return cve-id as a string or a list depending on build/version
+                _cve_raw = entry.get("info", {}).get("classification", {}).get("cve-id", [])
+                cve_list = [_cve_raw] if isinstance(_cve_raw, str) and _cve_raw else (_cve_raw or [])
                 cve_id = cve_list[0] if cve_list else ""
                 cvss = entry.get("info", {}).get("classification", {}).get("cvss-score", 0.0)
                 # nuclei v3: info.tags can be a comma-string OR a list depending on build
@@ -1313,7 +1360,7 @@ class NucleiAdapter:
                 else:
                     tags_list = list(_tags_raw) if _tags_raw else []
 
-                is_mcp = any(t in ["mcp", "mcp-server", "model-context-protocol"]
+                is_mcp = any(t in {"mcp", "mcp-server", "model-context-protocol", "mcp-inspector"}
                             for t in tags_list)
                 category = "mcp_exposure" if is_mcp else (
                     "cve" if cve_id else "vulnerability"
@@ -1331,8 +1378,8 @@ class NucleiAdapter:
                     cvss_score=float(cvss) if cvss else 0.0,
                     raw_data=entry,
                 ))
-            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-                pass
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as _e:
+                self._logger.debug("nuclei _parse: skip line (%s): %.200s", _e, line)
         return findings
 
 

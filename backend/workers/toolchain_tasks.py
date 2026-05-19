@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from celery import Celery
 from celery.schedules import crontab
 from celery.utils.log import get_task_logger
-import json, datetime
+import json, datetime, threading
 
 # ─── Celery App ───────────────────────────────────────────────────────────────
 celery_app = Celery(
@@ -235,130 +235,110 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
     job_id = config_dict.get("scan_id") or self.request.id
     logger.info(f"[{job_id}] [req={request_id}] Pipeline START: tenant={tenant_id}")
 
-    # Load tenant domain from DB (config_dict from API only has scan_id + scan_type)
+    # trigger_scan always passes domain/ip_ranges in config_dict, so this branch
+    # only fires when the task is invoked directly (e.g. beat scheduler or CLI).
     if not config_dict.get("domain"):
         tenant_info = _get_tenant_info(tenant_id)
         config_dict = {**config_dict, **tenant_info}
 
+    # Single shared connection for all progress writes (~8 per scan).
+    import psycopg2 as _pg
+    _prog_conn: object = None
+    try:
+        _db_url = os.getenv("DATABASE_URL", "")
+        if _db_url:
+            _prog_conn = _pg.connect(_db_url)
+    except Exception:
+        _prog_conn = None
+
     def _progress(pct: int, phase: str = ""):
         """Persist progress_pct so the frontend poll can show real progress."""
-        _update_scan_progress(job_id, pct, phase)
+        _update_scan_progress(job_id, pct, phase, conn=_prog_conn)
+
+    # Log buffer: tool adapters write here from multiple threads; flushed once per
+    # phase via _on_phase so the total DB writes drop from ~50 to ~8 per scan.
+    _log_buf: list = []
+    _log_lock = threading.Lock()
 
     def _diag_log(tool: str, msg: str, level: str = "info"):
-        _log_scan_event(job_id, tool, msg, level)
+        entry = {
+            "t": tool, "msg": msg, "level": level,
+            "ts": datetime.datetime.utcnow().strftime("%H:%M:%S"),
+        }
+        with _log_lock:
+            _log_buf.append(entry)
+
+    def _flush_logs():
+        """Write all buffered log entries to DB in a single batch call."""
+        with _log_lock:
+            if not _log_buf:
+                return
+            events = list(_log_buf)
+            _log_buf.clear()
+        _batch_log_scan_events(job_id, events)
+
+    domain    = config_dict.get("domain", "")
+    ip_ranges = config_dict.get("ip_ranges", [])
+
+    def _on_phase(phase: str, pct: int, report) -> None:
+        """Progress callback — called by pipeline.run() after each phase."""
+        _progress(pct, phase)
+        if phase == "starting":
+            _diag_log("pipeline", f"Scan gestartet für {domain or tenant_id}")
+            _diag_log("subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}")
+        elif phase == "discovery":
+            sub_count = len(report.subdomains_discovered)
+            _diag_log("subfinder", f"{sub_count} Subdomains/Domains gefunden")
+            email_count = len([f for f in report.findings_theharvester if f.category == "email"])
+            if email_count:
+                _diag_log("theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt")
+        elif phase == "portscan":
+            open_ports = report.open_ports or {}
+            port_count = sum(len(v) for v in open_ports.values())
+            _diag_log("naabu",
+                      f"{len(open_ports)} Hosts mit offenen Ports — {port_count} Ports total")
+            mcp = report.mcp_servers_found or []
+            if mcp:
+                _diag_log("naabu", f"MCP-Kandidaten erkannt: {', '.join(list(mcp)[:5])}", "warn")
+        elif phase == "tls":
+            _diag_log("sslyze",
+                      f"{len(report.findings_sslyze)} TLS-Findings (Protokoll, Cipher, Zertifikat)")
+        elif phase == "http":
+            _diag_log("httpx", f"{len(report.findings_httpx)} HTTP-Findings")
+        elif phase == "vuln":
+            _diag_log("nuclei", f"{len(report.findings_nuclei)} Vulnerabilities gefunden")
+            crit_vuln = [f for f in report.findings_nuclei if f.severity == "CRITICAL"]
+            if crit_vuln:
+                _diag_log("nuclei",
+                          f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
+        elif phase == "mcp":
+            mcp_findings = [f for f in report.findings_ramparts + report.findings_naabu
+                            if f.category == "mcp_exposure"]
+            _diag_log("ramparts",
+                      f"{len(mcp_findings)} MCP-Findings",
+                      "info" if not mcp_findings else "warn")
+        elif phase == "aggregating":
+            total = len(report.all_findings)
+            _diag_log("pipeline",
+                      f"Scan abgeschlossen — {total} Findings, Score: {report.risk_score}")
+        # Flush tool-adapter logs accumulated during this phase
+        _flush_logs()
 
     try:
         # Status: Running
         _update_scan_status(job_id, "running", tenant_id)
-        _progress(0, "starting")
 
         # Plan-spezifische Konfiguration
         config = _build_config(config_dict)
 
-        # Pipeline ausführen — mit Progress-Updates nach jeder Phase
+        # Pipeline ausführen — progress_fn called after each phase
         pipeline = EASMPipeline(tenant_id=tenant_id, config=config, log_fn=_diag_log)
-
-        import datetime as _dt
-        _start = _dt.datetime.utcnow()
-
-        def _run_with_progress():
-            domain    = config_dict.get("domain", "")
-            ip_ranges = config_dict.get("ip_ranges", [])
-            panos_ver = config_dict.get("panos_version", "")
-
-            from easm.pipeline import PipelineReport
-            _scan_start_ts = _dt.datetime.utcnow()
-            report = PipelineReport(
-                tenant_id=tenant_id,
-                domain=domain,
-                ip_ranges=ip_ranges,
-                scan_start=_scan_start_ts.isoformat(),
-            )
-
-            _progress(5, "discovery")
-            _log_scan_event(job_id, "pipeline", f"Scan gestartet für {domain or tenant_id}", "info")
-            _log_scan_event(job_id, "subfinder", f"Subdomain-Enumeration via passive DNS + OSINT für {domain}", "info")
-            subdomains = pipeline._phase_discovery(report, domain)
-            # Ensure root domain is always included for FQDN inventory and HTTP targets
-            if domain and domain not in report.subdomains_discovered:
-                report.subdomains_discovered.append(domain)
-                from easm.tool_adapters import ToolFinding as _TF
-                _root_finding = _TF(
-                    tenant_id=tenant_id, tool="subfinder", category="subdomain",
-                    severity="INFO", title=f"Root-Domain: {domain}",
-                    description=f"Root-Domain {domain} als Asset aufgenommen.",
-                    affected_asset=domain,
-                )
-                report.findings_subfinder.append(_root_finding)
-                subdomains.append(_root_finding)
-            sub_count = len(report.subdomains_discovered)
-            _log_scan_event(job_id, "subfinder", f"{sub_count} Subdomains/Domains gefunden", "info")
-            email_count = len([f for f in report.findings_theharvester if f.category == "email"])
-            if email_count:
-                _log_scan_event(job_id, "theharvester", f"{email_count} E-Mail-Adressen via OSINT gesammelt", "info")
-
-            _progress(20, "portscan")
-            _scan_targets = list(set(
-                ip_ranges + [s.affected_asset for s in subdomains if "." in s.affected_asset]
-            ))
-            _log_scan_event(job_id, "naabu", f"Port-Scan auf {len(_scan_targets)} Hosts gestartet (SYN, Top-1000)", "info")
-            open_ports = pipeline._phase_portscan(report, _scan_targets)
-            mcp_hosts = pipeline._identify_mcp_hosts(report)
-            port_count = sum(len(v) for v in (open_ports or {}).values())
-            _log_scan_event(job_id, "naabu", f"{len(open_ports or {})} Hosts mit offenen Ports — {port_count} Ports total", "info")
-            if mcp_hosts:
-                _log_scan_event(job_id, "naabu", f"MCP-Kandidaten erkannt: {', '.join(list(mcp_hosts)[:5])}", "warn")
-
-            _progress(35, "tls")
-            tls_targets = pipeline._build_tls_targets(open_ports, subdomains)
-            _log_scan_event(job_id, "sslyze", f"TLS-Analyse auf {len(tls_targets)} Endpunkten", "info")
-            pipeline._phase_tls(report, tls_targets)
-            _log_scan_event(job_id, "sslyze", f"{len(report.findings_sslyze)} TLS-Findings (Protokoll, Cipher, Zertifikat)", "info")
-
-            _progress(50, "http")
-            http_targets = pipeline._build_http_targets(open_ports, subdomains)
-            if domain:
-                for _scheme in ("https", "http"):
-                    _root = f"{_scheme}://{domain}"
-                    if _root not in http_targets:
-                        http_targets.append(_root)
-            _log_scan_event(job_id, "httpx", f"HTTP-Probing auf {len(http_targets)} URLs (Tech-Stack, Expositionen)", "info")
-            pipeline._phase_http(report, http_targets)
-            _log_scan_event(job_id, "httpx", f"{len(report.findings_httpx)} HTTP-Findings", "info")
-
-            _progress(70, "vuln")
-            _log_scan_event(job_id, "nuclei", f"Vulnerability-Scan auf {len(http_targets)} Targets (CVE, Misconfig, API)", "info")
-            pipeline._phase_vulnscan(report, list(set(http_targets + mcp_hosts)), list(mcp_hosts))
-            _log_scan_event(job_id, "nuclei", f"{len(report.findings_nuclei)} Vulnerabilities gefunden", "info")
-            crit_vuln = [f for f in report.findings_nuclei if f.severity == "CRITICAL"]
-            if crit_vuln:
-                _log_scan_event(job_id, "nuclei", f"CRITICAL: {crit_vuln[0].title} — {crit_vuln[0].affected_asset}", "error")
-
-            _progress(88, "mcp")
-            mcp_phase_targets = list(mcp_hosts)
-            if domain and not mcp_phase_targets:
-                for _port in (3000, 8080, 8000, 6274, 6277):
-                    mcp_phase_targets.append(f"http://{domain}:{_port}")
-                    mcp_phase_targets.append(f"https://{domain}:{_port}")
-            _log_scan_event(job_id, "ramparts", f"MCP-Analyse auf {len(set(mcp_phase_targets))} Kandidaten", "info")
-            if config.run_ramparts:
-                pipeline._phase_mcp(report, list(set(mcp_phase_targets)))
-            _mcp_pre_agg = [f for f in report.findings_ramparts + report.findings_naabu
-                            if f.category == "mcp_exposure"]
-            _log_scan_event(job_id, "ramparts", f"{len(_mcp_pre_agg)} MCP-Findings", "info" if not _mcp_pre_agg else "warn")
-
-            _progress(95, "aggregating")
-            pipeline._aggregate(report)
-
-            end_ts = _dt.datetime.utcnow()
-            report.scan_end = end_ts.isoformat()
-            report.duration_seconds = int((end_ts - _scan_start_ts).total_seconds())
-            pipeline._print_summary(report)
-            total = len(report.all_findings)
-            _log_scan_event(job_id, "pipeline", f"Scan abgeschlossen — {total} Findings, Score: {report.risk_score}", "info")
-            return report
-
-        report = _run_with_progress()
+        report = pipeline.run(
+            domain=domain,
+            ip_ranges=ip_ranges,
+            panos_version=config_dict.get("panos_version", ""),
+            progress_fn=_on_phase,
+        )
 
         _progress(99, "saving")
         # Ergebnisse in DB speichern
@@ -408,8 +388,16 @@ def run_full_pipeline(self, tenant_id: str, config_dict: dict, request_id: str =
 
     except Exception as exc:
         logger.error(f"[{job_id}] Pipeline FAILED: {exc}")
+        _flush_logs()  # persist any buffered diagnostic logs before marking failed
         _update_scan_status(job_id, "failed", tenant_id, {"error": str(exc)})
         raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
+
+    finally:
+        if _prog_conn:
+            try:
+                _prog_conn.close()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -513,8 +501,8 @@ def run_http_probe(tenant_id: str, urls: list,
     queue="vuln"
 )
 def run_vuln_scan(tenant_id: str, targets: list,
-                  tags: str = "api,exposure,misconfig,default-login,cve",
-                  severity: str = "medium,high,critical"):
+                  tags: str = "api,exposure,misconfig,default-logins,tech,cve",
+                  severity: str = "info,medium,high,critical"):
     """Nur Vulnerability-Scan: Nuclei"""
     from easm.tool_adapters import NucleiAdapter
 
@@ -566,7 +554,10 @@ def run_mcp_scan(tenant_id: str, targets: list, use_ramparts: bool = True):
     if use_ramparts:
         mcp_urls = []
         for target in targets:
-            host = target.replace("http://","").replace("https://","").split("/")[0]
+            # Strip scheme, path, and port — same fix as _check_mcp_handshake:
+            # targets may be full URLs (http://host:3000) where split("/")[0]
+            # leaves "host:3000", causing "http://host:3000:8080/mcp" (invalid).
+            host = target.replace("http://","").replace("https://","").split("/")[0].split(":")[0]
             for port in [3000, 8080, 8000, 9000, 6277]:
                 mcp_urls.extend([
                     f"http://{host}:{port}/mcp",
@@ -914,7 +905,7 @@ def _update_scan_status(job_id: str, status: str,
                         completed_at      = NOW(),
                         duration_seconds  = %s,
                         risk_score_after  = %s,
-                        findings_count    = %s,
+                        findings_count    = %s::jsonb,
                         raw_results       = COALESCE(raw_results, '{}'::jsonb)
                                            || %s::jsonb
                     WHERE id = %s
@@ -948,11 +939,55 @@ def _update_scan_status(job_id: str, status: str,
                 pass
 
 
-def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
-    """Updates progress_pct in raw_results so the frontend poll sees real progress."""
+def _update_scan_progress(job_id: str, pct: int, phase: str = "", conn=None):
+    """Updates progress_pct in raw_results so the frontend poll sees real progress.
+
+    Pass an open psycopg2 connection as *conn* to avoid reopening the DB
+    connection on every call (e.g. once per phase inside run_full_pipeline).
+    When *conn* is None a fresh connection is opened and closed automatically.
+    """
     import psycopg2
     db_url = os.getenv("DATABASE_URL", "")
     if not db_url:
+        return
+    _own_conn = conn is None
+    try:
+        if _own_conn:
+            conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            # Use jsonb_set per key instead of || so scan_log (and other keys
+            # written by concurrent _log_scan_event calls) are never overwritten.
+            cur.execute("""
+                UPDATE scan_jobs
+                SET raw_results = jsonb_set(
+                    jsonb_set(
+                        COALESCE(raw_results, '{}'::jsonb),
+                        '{progress_pct}', to_jsonb(%s::int)
+                    ),
+                    '{current_phase}', to_jsonb(%s::text)
+                )
+                WHERE id = %s
+            """, (pct, phase, job_id))
+        conn.commit()
+    except Exception as exc:
+        logger.warning(f"_update_scan_progress failed: {exc}")
+    finally:
+        if _own_conn and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _batch_log_scan_events(job_id: str, events: list) -> None:
+    """Appends a batch of log entries to raw_results->scan_log in one DB write.
+
+    Each event is a dict with keys: t (tool), msg, level, ts.
+    Used by run_full_pipeline to reduce ~50 single-row writes to ~8 batch writes.
+    """
+    import psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url or not job_id or not events:
         return
     conn = None
     try:
@@ -960,13 +995,16 @@ def _update_scan_progress(job_id: str, pct: int, phase: str = ""):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE scan_jobs
-                SET raw_results = COALESCE(raw_results, '{}'::jsonb)
-                    || jsonb_build_object('progress_pct', %s, 'current_phase', %s)
+                SET raw_results = jsonb_set(
+                    COALESCE(raw_results, '{}'::jsonb),
+                    '{scan_log}',
+                    COALESCE(raw_results->'scan_log', '[]'::jsonb) || %s::jsonb
+                )
                 WHERE id = %s
-            """, (pct, phase, job_id))
+            """, (json.dumps(events), job_id))
         conn.commit()
     except Exception as exc:
-        logger.warning(f"_update_scan_progress failed: {exc}")
+        logger.debug(f"_batch_log_scan_events failed: {exc}")
     finally:
         if conn:
             try:

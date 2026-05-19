@@ -68,8 +68,9 @@ class PipelineConfig:
     httpx_screenshots: bool = True
     httpx_threads: int = 50
 
-    # Nuclei
-    nuclei_tags: str = "api,exposure,misconfig,default-login,mcp,cve"
+    # Nuclei — tags must match NucleiAdapter.run() fallback; "default-logins" (plural)
+    # is the actual nuclei template folder/tag name (not "default-login")
+    nuclei_tags: str = "api,exposure,misconfig,default-logins,mcp,cve,tech"
     nuclei_severity: str = "low,medium,high,critical"
     nuclei_rate: int = 100
 
@@ -135,8 +136,8 @@ class EASMPipeline:
         self.nuclei = NucleiAdapter()
         self.ramparts = RampartsAdapter()
 
-    def run(self, domain: str, ip_ranges: list[str],
-            panos_version: str = "") -> PipelineReport:
+    def run(self, domain: str, ip_ranges: list[str] = None,
+            panos_version: str = "", progress_fn=None) -> PipelineReport:
         """
         Führt vollständigen EASM-Scan aus.
 
@@ -144,7 +145,17 @@ class EASMPipeline:
             domain: Haupt-Domain des Mandanten
             ip_ranges: IP-Ranges für Port-Scan (CIDR)
             panos_version: PAN-OS-Version für CVE-Matching
+            progress_fn: Optional callback(phase: str, pct: int, report) called after each phase
         """
+        ip_ranges = ip_ranges or []
+
+        def _notify(phase: str, pct: int):
+            if progress_fn:
+                try:
+                    progress_fn(phase, pct, report)
+                except Exception:
+                    pass
+
         report = PipelineReport(
             tenant_id=self.tenant_id,
             domain=domain,
@@ -154,54 +165,60 @@ class EASMPipeline:
 
         start_ts = datetime.datetime.utcnow()
 
-        print(f"\n{'='*60}")
-        print(f"  EASM Pipeline: {domain} [{self.tenant_id}]")
-        print(f"  IP-Ranges: {ip_ranges}")
-        print(f"{'='*60}\n")
+        self._log("pipeline", f"Start: {domain} [{self.tenant_id}] | IP-Ranges: {ip_ranges}", "info")
+        _notify("starting", 0)
 
         # ── Phase 1: Discovery (Subfinder + theHarvester parallel) ────────────
-        print("[Phase 1/6] Subdomain Discovery...")
+        self._log("pipeline", "Phase 1/6: Subdomain Discovery", "info")
         subdomains = self._phase_discovery(report, domain)
-        print(f"  → {len(subdomains)} Subdomains gefunden")
+        self._log("pipeline", f"Phase 1 done: {len(subdomains)} Subdomains", "info")
+        _notify("discovery", 5)
 
         # ── Phase 2: Port-Scan (Naabu) ────────────────────────────────────────
-        print("[Phase 2/6] Port-Scanning...")
+        self._log("pipeline", "Phase 2/6: Port-Scanning", "info")
         all_hosts = list(set(ip_ranges + [s.affected_asset for s in subdomains
                                           if "." in s.affected_asset]))
         open_ports = self._phase_portscan(report, all_hosts)
         mcp_hosts = self._identify_mcp_hosts(report)
-        print(f"  → {sum(len(p) for p in open_ports.values())} offene Ports")
-        print(f"  → {len(mcp_hosts)} mögliche MCP-Server-Hosts")
+        self._log("pipeline",
+                  f"Phase 2 done: {sum(len(p) for p in open_ports.values())} offene Ports | "
+                  f"{len(mcp_hosts)} MCP-Kandidaten", "info")
+        _notify("portscan", 20)
 
         # ── Phase 3: TLS-Scan (SSLyze) ────────────────────────────────────────
-        print("[Phase 3/6] TLS-Scanning...")
+        self._log("pipeline", "Phase 3/6: TLS-Scanning", "info")
         tls_targets = self._build_tls_targets(open_ports, subdomains)
         self._phase_tls(report, tls_targets)
-        print(f"  → {len(report.findings_sslyze)} TLS-Findings")
+        self._log("pipeline", f"Phase 3 done: {len(report.findings_sslyze)} TLS-Findings", "info")
+        _notify("tls", 35)
 
         # ── Phase 4: HTTP-Probing (HTTPX) ─────────────────────────────────────
-        print("[Phase 4/6] HTTP-Probing & Fingerprinting...")
-        http_targets = self._build_http_targets(open_ports, subdomains)
+        self._log("pipeline", "Phase 4/6: HTTP-Probing & Fingerprinting", "info")
+        http_targets = self._build_http_targets(open_ports, subdomains, domain)
         self._phase_http(report, http_targets)
-        print(f"  → {len(report.findings_httpx)} HTTP-Findings")
+        self._log("pipeline", f"Phase 4 done: {len(report.findings_httpx)} HTTP-Findings", "info")
+        _notify("http", 50)
 
         # ── Phase 5: Vulnerability-Scan (Nuclei) ──────────────────────────────
-        print("[Phase 5/6] Vulnerability-Scanning...")
+        self._log("pipeline", "Phase 5/6: Vulnerability-Scanning (Nuclei)", "info")
         vuln_targets = list(set(http_targets + mcp_hosts))
         self._phase_vulnscan(report, vuln_targets, mcp_hosts)
-        print(f"  → {len(report.findings_nuclei)} Nuclei-Findings")
+        self._log("pipeline", f"Phase 5 done: {len(report.findings_nuclei)} Nuclei-Findings", "info")
+        _notify("vuln", 70)
 
         # ── Phase 6: MCP-Tiefenanalyse (Ramparts) ────────────────────────────
         if mcp_hosts and self.config.run_ramparts:
-            print("[Phase 6/6] MCP-Tiefenanalyse...")
+            self._log("pipeline", "Phase 6/6: MCP-Tiefenanalyse (Ramparts)", "info")
             self._phase_mcp(report, mcp_hosts)
-            print(f"  → {len(report.findings_ramparts)} MCP-Findings")
+            self._log("pipeline", f"Phase 6 done: {len(report.findings_ramparts)} MCP-Findings", "info")
         else:
-            print("[Phase 6/6] MCP-Analyse übersprungen (keine MCP-Hosts)")
+            self._log("pipeline", "Phase 6/6: MCP-Analyse übersprungen (keine MCP-Hosts)", "info")
+        _notify("mcp", 88)
 
         # ── Aggregation + Deduplication ───────────────────────────────────────
-        print("\n[Aggregation] Deduplizierung & Risk-Scoring...")
+        self._log("pipeline", "Aggregation: Deduplizierung & Risk-Scoring", "info")
         self._aggregate(report)
+        _notify("aggregating", 95)
 
         # ── Abschluss ─────────────────────────────────────────────────────────
         end_ts = datetime.datetime.utcnow()
@@ -213,7 +230,6 @@ class EASMPipeline:
 
     def _phase_discovery(self, report: PipelineReport, domain: str) -> list[ToolFinding]:
         """Phase 1: Parallele Subdomain-Discovery"""
-        from easm.tool_adapters import tool_available
         all_subs = []
 
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -251,9 +267,22 @@ class EASMPipeline:
                         report.findings_theharvester = findings
                         for f in findings:
                             if f.category == "email":
-                                report.emails_harvested = f.raw_data.get("emails", [])
+                                report.emails_harvested.extend(f.raw_data.get("emails", []))
                 except Exception as e:
                     self._log(tool, f"Phase-Fehler: {e}", "error")
+
+        # Ensure the root domain itself is always in the discovered list so
+        # HTTP probing and nuclei always target it, even if subfinder omits it.
+        if domain and domain not in report.subdomains_discovered:
+            report.subdomains_discovered.append(domain)
+            root_finding = ToolFinding(
+                tenant_id=self.tenant_id, tool="subfinder", category="subdomain",
+                severity="INFO", title=f"Root-Domain: {domain}",
+                description=f"Root-Domain {domain} als Asset aufgenommen.",
+                affected_asset=domain,
+            )
+            report.findings_subfinder.append(root_finding)
+            all_subs.append(root_finding)
 
         return all_subs
 
@@ -321,10 +350,19 @@ class EASMPipeline:
 
     def _build_tls_targets(self, open_ports: dict,
                             subdomains: list[ToolFinding]) -> list[dict]:
-        """Baut TLS-Target-Liste: [(host, port), ...] für bekannte HTTPS-Ports"""
+        """Baut TLS-Target-Liste für bekannte HTTPS-Ports.
+
+        Für Hosts die der Portscan abgedeckt hat, werden nur tatsächlich
+        offene HTTPS-Ports genutzt. Für Hosts außerhalb des Portscan-Scope
+        (z.B. wenn naabu nicht verfügbar war) wird Port 443 als Fallback
+        angenommen.
+        """
         HTTPS_PORTS = {443, 8443, 9443, 4443, 5986, 6443, 8200}
         targets = []
         seen = set()
+
+        # Hosts mit Portscan-Ergebnissen: nur bestätigte HTTPS-Ports
+        scanned_hosts = set(open_ports.keys())
         for host, ports in open_ports.items():
             for port in ports:
                 if port in HTTPS_PORTS:
@@ -332,12 +370,17 @@ class EASMPipeline:
                     if key not in seen:
                         seen.add(key)
                         targets.append({"host": host, "port": port})
-        # Subdomains auf Port 443
+
+        # Subdomains außerhalb des Portscan-Scope: Port 443 als Fallback
         for sub in subdomains:
-            key = (sub.affected_asset, 443)
+            host = sub.affected_asset
+            if host in scanned_hosts:
+                continue  # Portscan hat entschieden ob 443 offen ist
+            key = (host, 443)
             if key not in seen:
                 seen.add(key)
-                targets.append({"host": sub.affected_asset, "port": 443})
+                targets.append({"host": host, "port": 443})
+
         return targets
 
     def _phase_tls(self, report: PipelineReport, targets: list[dict]):
@@ -355,7 +398,7 @@ class EASMPipeline:
                         findings_raw.extend(fut.result())
                     except Exception as e:
                         t = futures[fut]
-                        print(f"  ⚠ SSLyze {t['host']}:{t['port']}: {e}")
+                        self._log("sslyze", f"{t['host']}:{t['port']}: {e}", "warn")
             tls_findings = []
             for raw in findings_raw:
                 tls_findings.append(ToolFinding(
@@ -370,10 +413,11 @@ class EASMPipeline:
                 ))
             report.findings_sslyze = tls_findings
         except Exception as e:
-            print(f"  ⚠ SSLyze Fehler: {e}")
+            self._log("sslyze", f"Phase-Fehler: {e}", "error")
 
     def _build_http_targets(self, open_ports: dict,
-                             subdomains: list[ToolFinding]) -> list[str]:
+                             subdomains: list[ToolFinding],
+                             domain: str = "") -> list[str]:
         """Baut HTTP-Target-Liste aus Port-Scan-Ergebnissen"""
         targets = []
         HTTP_PORTS = {80, 8080, 8000, 8008, 8081, 8090, 3000, 9000, 10000}
@@ -389,6 +433,11 @@ class EASMPipeline:
         # Subdomains direkt (HTTPX prüft http + https)
         for sub in subdomains:
             targets.append(sub.affected_asset)
+
+        # Always probe the root domain on both schemes
+        if domain:
+            for scheme in ("https", "http"):
+                targets.append(f"{scheme}://{domain}")
 
         return list(set(targets))
 
@@ -525,26 +574,24 @@ class EASMPipeline:
 
     def _print_summary(self, report: PipelineReport):
         s = report.stats
-        print(f"\n{'='*60}")
-        print(f"  EASM-Scan abgeschlossen: {report.domain}")
-        print(f"  Dauer: {report.duration_seconds}s")
-        print(f"  Risk-Score: {report.risk_score}/100")
-        print(f"")
-        print(f"  Findings gesamt: {s.get('total_findings', 0)}")
-        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
-            cnt = s.get("by_severity", {}).get(sev, 0)
-            if cnt:
-                print(f"    {sev:10s}: {cnt}")
-        print(f"")
-        print(f"  Subdomains: {s.get('subdomains_found', 0)}")
-        print(f"  E-Mails:    {s.get('emails_found', 0)}")
-        print(f"  MCP-Server: {s.get('mcp_servers_found', 0)}")
-        print(f"")
-        print(f"  By Tool:")
-        for tool, cnt in s.get("by_tool", {}).items():
-            if cnt:
-                print(f"    {tool:15s}: {cnt} Findings")
-        print(f"{'='*60}\n")
+        sev_parts = " | ".join(
+            f"{sev}: {s.get('by_severity', {}).get(sev, 0)}"
+            for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+        )
+        tool_parts = " | ".join(
+            f"{tool}: {cnt}"
+            for tool, cnt in s.get("by_tool", {}).items() if cnt
+        )
+        self._log("pipeline",
+                  f"DONE {report.domain} | {report.duration_seconds}s | "
+                  f"score={report.risk_score} | total={s.get('total_findings', 0)} | "
+                  f"{sev_parts}", "info")
+        if tool_parts:
+            self._log("pipeline", f"By tool: {tool_parts}", "info")
+        self._log("pipeline",
+                  f"subdomains={s.get('subdomains_found', 0)} "
+                  f"emails={s.get('emails_found', 0)} "
+                  f"mcp={s.get('mcp_servers_found', 0)}", "info")
 
 
 # ─── Celery-Task-Integration ──────────────────────────────────────────────────

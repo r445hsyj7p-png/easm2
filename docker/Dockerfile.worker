@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
     unzip \
+    git \
     dnsutils \
     nmap \
     libpq-dev \
@@ -55,23 +56,19 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     rm -rf /tmp/subfinder* /tmp/httpx* /tmp/naabu*
 
 # theHarvester — OSINT tool
-# Install heavy deps first so the git install doesn't time out on them
-RUN pip install --no-cache-dir \
-    dnspython \
-    aiodns \
-    aiohttp \
-    lxml \
-    requests \
-    netaddr \
-    pyasyncore \
+# Notes:
+#   - pip install git+... silently failed because git was missing from PATH
+#   - v4.8.0 uses pyproject.toml (no requirements/base.txt) — pip install . is correct
+#   - Tags have no 'v' prefix: 4.8.0 not v4.8.0
+#   - pip creates /usr/local/bin/theHarvester entry point from pyproject.toml
+RUN git clone --depth 1 --branch 4.8.0 \
+      https://github.com/laramies/theHarvester.git /opt/theHarvester \
+    && pip install --no-cache-dir --no-deps /opt/theHarvester \
     && pip install --no-cache-dir \
-    "git+https://github.com/laramies/theHarvester.git@master" \
-    && echo "theHarvester installed OK" \
-    || echo "theHarvester git install failed — trying PyPI stub fallback"
-# Verify the entry point was created
-RUN which theHarvester && theHarvester --help 2>&1 | head -3 || \
-    python -m theHarvester --help 2>&1 | head -3 || \
-    echo "WARNING: theHarvester not callable — will skip at runtime"
+       dnspython aiodns aiohttp lxml requests netaddr \
+       beautifulsoup4 ujson python-dateutil retrying \
+    && theHarvester --help 2>&1 | head -2 \
+    && echo "theHarvester 4.8.0 OK"
 
 # Python dependencies
 WORKDIR /app
@@ -80,7 +77,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ramparts is worker-only and may not be on PyPI — install best-effort
 RUN pip install --no-cache-dir ramparts || echo "ramparts not available on PyPI, skipping"
 
-# App code — CACHEBUST=20260518-4
+# App code — CACHEBUST=20260518-7
 COPY . .
 
 # Entrypoint
